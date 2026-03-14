@@ -218,10 +218,6 @@ function RepoSlideOver({
 						<div className="space-y-2">
 							{field("linearWorkspaceId", "Workspace ID")}
 							{field("linearWorkspaceName", "Workspace name")}
-							{field("linearToken", "Token", { type: "password" })}
-							{field("linearRefreshToken", "Refresh token", {
-								type: "password",
-							})}
 							<div>
 								<label className="block text-xs font-medium mb-1">
 									Team keys

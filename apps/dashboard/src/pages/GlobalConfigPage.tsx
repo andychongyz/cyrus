@@ -49,6 +49,115 @@ function TagInput({
 }
 
 const RUNNERS = ["claude", "gemini", "codex", "cursor"] as const;
+
+type WorkspaceEntry = {
+	linearToken: string;
+	linearRefreshToken?: string;
+	linearWorkspaceSlug?: string;
+	linearWorkspaceName?: string;
+};
+
+function LinearWorkspacesEditor({
+	value,
+	onChange,
+}: {
+	value: Record<string, WorkspaceEntry>;
+	onChange: (v: Record<string, WorkspaceEntry>) => void;
+}) {
+	const [newId, setNewId] = useState("");
+
+	const update = (id: string, field: keyof WorkspaceEntry, val: string) => {
+		onChange({
+			...value,
+			[id]: { ...value[id], [field]: val || undefined },
+		});
+	};
+
+	const remove = (id: string) => {
+		const { [id]: _, ...rest } = value;
+		onChange(rest);
+	};
+
+	const add = () => {
+		const id = newId.trim();
+		if (!id || value[id]) return;
+		onChange({ ...value, [id]: { linearToken: "" } });
+		setNewId("");
+	};
+
+	const entries = Object.entries(value);
+
+	return (
+		<div className="space-y-3">
+			{entries.length === 0 && (
+				<p className="text-xs text-muted-foreground italic">
+					No workspaces configured. Run{" "}
+					<code className="font-mono bg-muted px-1 rounded">
+						cyrus self-auth
+					</code>{" "}
+					to authenticate, or add one below.
+				</p>
+			)}
+			{entries.map(([id, ws]) => (
+				<div key={id} className="border rounded-md p-3 space-y-2 text-sm">
+					<div className="flex items-center justify-between">
+						<span className="font-mono text-xs font-semibold text-muted-foreground">
+							{id}
+						</span>
+						<button
+							onClick={() => remove(id)}
+							className="text-xs text-destructive hover:underline"
+						>
+							Remove
+						</button>
+					</div>
+					{(
+						[
+							["linearWorkspaceName", "Workspace name", "text", "e.g. Acme"],
+							["linearWorkspaceSlug", "Workspace slug", "text", "e.g. acme"],
+							["linearToken", "OAuth token", "password", "lin_oauth_…"],
+							[
+								"linearRefreshToken",
+								"Refresh token",
+								"password",
+								"lin_refresh_…",
+							],
+						] as [keyof WorkspaceEntry, string, string, string][]
+					).map(([field, label, type, placeholder]) => (
+						<div key={field}>
+							<label className="block text-xs font-medium mb-0.5">
+								{label}
+							</label>
+							<input
+								type={type}
+								value={(ws[field] as string) ?? ""}
+								onChange={(e) => update(id, field, e.target.value)}
+								placeholder={placeholder}
+								className="w-full border rounded-md px-3 py-1.5 text-sm bg-background focus:outline-none focus:ring-2 focus:ring-ring"
+							/>
+						</div>
+					))}
+				</div>
+			))}
+			<div className="flex gap-2">
+				<input
+					value={newId}
+					onChange={(e) => setNewId(e.target.value)}
+					onKeyDown={(e) => e.key === "Enter" && add()}
+					placeholder="Workspace ID (e.g. abc123)"
+					className="flex-1 border rounded-md px-3 py-1.5 text-sm bg-background focus:outline-none focus:ring-2 focus:ring-ring"
+				/>
+				<button
+					onClick={add}
+					disabled={!newId.trim()}
+					className="px-3 py-1.5 border rounded-md text-sm hover:bg-muted disabled:opacity-40 transition-colors"
+				>
+					Add workspace
+				</button>
+			</div>
+		</div>
+	);
+}
 const KNOWN_ENV_KEYS = [
 	{
 		key: "ANTHROPIC_API_KEY",
@@ -252,20 +361,24 @@ export function GlobalConfigPage() {
 								className="w-full border rounded-md px-3 py-1.5 text-sm bg-background focus:outline-none focus:ring-2 focus:ring-ring"
 							/>
 						</div>
-						<div>
-							<label className="block text-xs font-medium mb-1">
-								Linear workspace slug
-							</label>
-							<input
-								value={(cfg.linearWorkspaceSlug as string) ?? ""}
-								onChange={(e) =>
-									set("linearWorkspaceSlug", e.target.value || undefined)
-								}
-								placeholder="e.g. mycompany"
-								className="w-full border rounded-md px-3 py-1.5 text-sm bg-background focus:outline-none focus:ring-2 focus:ring-ring"
-							/>
-						</div>
 					</div>
+				</section>
+
+				{/* Linear Workspaces */}
+				<section>
+					<h2 className="text-sm font-semibold mb-1 text-muted-foreground uppercase tracking-wide">
+						Linear Workspaces
+					</h2>
+					<p className="text-xs text-muted-foreground mb-3">
+						OAuth tokens are stored per workspace. Each repository links to a
+						workspace via its Workspace ID field.
+					</p>
+					<LinearWorkspacesEditor
+						value={
+							(cfg.linearWorkspaces as Record<string, WorkspaceEntry>) ?? {}
+						}
+						onChange={(v) => set("linearWorkspaces", v)}
+					/>
 				</section>
 
 				{/* Environment Variables */}

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Pencil, Plus, Trash2, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { getConfig, saveConfig } from "@/api/config";
 
 function TagInput({
@@ -55,17 +55,18 @@ function LabelBranchEditor({
 	value?: Record<string, { base?: string; prefix?: string }>;
 	onChange: (v: Record<string, { base?: string; prefix?: string }>) => void;
 }) {
-	const entries: LabelBranchEntry[] = Object.entries(value).map(
-		([label, cfg]) => ({
+	// Local state so empty/new rows are preserved while the user types
+	const [entries, setEntries] = useState<LabelBranchEntry[]>(() =>
+		Object.entries(value).map(([label, cfg]) => ({
 			label,
 			base: cfg.base ?? "",
 			prefix: cfg.prefix ?? "",
-		}),
+		})),
 	);
 
-	const update = (entries: LabelBranchEntry[]) => {
+	const syncToParent = (list: LabelBranchEntry[]) => {
 		const obj: Record<string, { base?: string; prefix?: string }> = {};
-		for (const e of entries)
+		for (const e of list)
 			if (e.label)
 				obj[e.label] = {
 					base: e.base || undefined,
@@ -74,44 +75,54 @@ function LabelBranchEditor({
 		onChange(obj);
 	};
 
+	const updateAt = (i: number, patch: Partial<LabelBranchEntry>) => {
+		const next = entries.map((e, j) => (j === i ? { ...e, ...patch } : e));
+		setEntries(next);
+		syncToParent(next);
+	};
+
+	const removeAt = (i: number) => {
+		const next = entries.filter((_, j) => j !== i);
+		setEntries(next);
+		syncToParent(next);
+	};
+
 	return (
 		<div className="space-y-2">
+			{entries.length > 0 && (
+				<div className="grid grid-cols-[1fr_1fr_1fr_auto] gap-2 px-1 text-xs text-muted-foreground">
+					<span>Label</span>
+					<span>Base branch</span>
+					<span>Prefix</span>
+					<span />
+				</div>
+			)}
 			{entries.map((entry, i) => (
-				<div key={i} className="flex gap-2 items-center">
+				<div
+					key={i}
+					className="grid grid-cols-[1fr_1fr_1fr_auto] gap-2 items-center"
+				>
 					<input
 						value={entry.label}
-						onChange={(e) => {
-							const next = [...entries];
-							next[i] = { ...entry, label: e.target.value };
-							update(next);
-						}}
-						placeholder="label"
-						className="w-24 border rounded px-2 py-1 text-xs bg-background"
+						onChange={(e) => updateAt(i, { label: e.target.value })}
+						placeholder="e.g. hotfix"
+						className="border rounded px-2 py-1.5 text-xs bg-background focus:outline-none focus:ring-1 focus:ring-ring"
 					/>
-					<span className="text-muted-foreground text-xs">→</span>
 					<input
 						value={entry.base}
-						onChange={(e) => {
-							const next = [...entries];
-							next[i] = { ...entry, base: e.target.value };
-							update(next);
-						}}
-						placeholder="base branch"
-						className="w-28 border rounded px-2 py-1 text-xs bg-background"
+						onChange={(e) => updateAt(i, { base: e.target.value })}
+						placeholder="e.g. main"
+						className="border rounded px-2 py-1.5 text-xs bg-background focus:outline-none focus:ring-1 focus:ring-ring"
 					/>
 					<input
 						value={entry.prefix}
-						onChange={(e) => {
-							const next = [...entries];
-							next[i] = { ...entry, prefix: e.target.value };
-							update(next);
-						}}
-						placeholder="prefix (e.g. hotfix/)"
-						className="w-32 border rounded px-2 py-1 text-xs bg-background"
+						onChange={(e) => updateAt(i, { prefix: e.target.value })}
+						placeholder="e.g. hotfix/"
+						className="border rounded px-2 py-1.5 text-xs bg-background focus:outline-none focus:ring-1 focus:ring-ring"
 					/>
 					<button
-						onClick={() => update(entries.filter((_, j) => j !== i))}
-						className="text-muted-foreground hover:text-destructive"
+						onClick={() => removeAt(i)}
+						className="p-1 text-muted-foreground hover:text-destructive transition-colors"
 					>
 						<X size={12} />
 					</button>
@@ -119,9 +130,9 @@ function LabelBranchEditor({
 			))}
 			<button
 				onClick={() =>
-					update([...entries, { label: "", base: "", prefix: "" }])
+					setEntries((prev) => [...prev, { label: "", base: "", prefix: "" }])
 				}
-				className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
+				className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 mt-1 transition-colors"
 			>
 				<Plus size={12} /> Add rule
 			</button>
@@ -131,7 +142,7 @@ function LabelBranchEditor({
 
 type Repo = Record<string, unknown>;
 
-function RepoSlideOver({
+function RepoModal({
 	repo,
 	onClose,
 	onSave,
@@ -147,15 +158,23 @@ function RepoSlideOver({
 	const set = (key: string, value: unknown) =>
 		setForm((f) => ({ ...f, [key]: value }));
 
+	useEffect(() => {
+		const handler = (e: KeyboardEvent) => {
+			if (e.key === "Escape") onClose();
+		};
+		document.addEventListener("keydown", handler);
+		return () => document.removeEventListener("keydown", handler);
+	}, [onClose]);
+
 	const field = (
 		key: string,
 		label: string,
-		opts?: { type?: string; placeholder?: string },
+		opts?: { placeholder?: string },
 	) => (
 		<div>
 			<label className="block text-xs font-medium mb-1">{label}</label>
 			<input
-				type={opts?.type ?? "text"}
+				type="text"
 				value={(form[key] as string) ?? ""}
 				onChange={(e) => set(key, e.target.value || undefined)}
 				placeholder={opts?.placeholder}
@@ -165,132 +184,157 @@ function RepoSlideOver({
 	);
 
 	return (
-		<div className="fixed inset-0 z-50 flex">
-			<div className="flex-1 bg-black/40" onClick={onClose} />
-			<div className="w-[520px] bg-background border-l shadow-xl overflow-y-auto flex flex-col">
-				<div className="flex items-center justify-between px-5 py-4 border-b sticky top-0 bg-background z-10">
-					<h2 className="font-semibold">
+		<div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+			<div className="absolute inset-0 bg-black/50" onClick={onClose} />
+			<div className="relative bg-background rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+				{/* Header */}
+				<div className="flex items-center justify-between px-6 py-4 border-b">
+					<h2 className="font-semibold text-base">
 						{isNew ? "Add Repository" : "Edit Repository"}
 					</h2>
 					<button
 						onClick={onClose}
-						className="text-muted-foreground hover:text-foreground"
+						className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
 					>
-						<X size={18} />
+						<X size={16} />
 					</button>
 				</div>
-				<div className="p-5 space-y-6 flex-1">
+
+				{/* Scrollable body */}
+				<div className="overflow-y-auto flex-1 px-6 py-5 space-y-6">
 					{/* Identity */}
 					<section>
-						<h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
+						<h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-3">
 							Identity
 						</h3>
-						<div className="space-y-2">
+						<div className="grid grid-cols-2 gap-3">
 							{field("name", "Name")}
 							{field("id", "ID")}
 						</div>
 					</section>
 
+					<hr className="border-border" />
+
 					{/* Git */}
 					<section>
-						<h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
+						<h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-3">
 							Git
 						</h3>
-						<div className="space-y-2">
-							{field("repositoryPath", "Repository path", {
-								placeholder: "/path/to/repo",
-							})}
-							{field("baseBranch", "Base branch", { placeholder: "main" })}
-							{field("workspaceBaseDir", "Workspace base dir", {
-								placeholder: "/path/to/worktrees",
-							})}
-							{field("githubUrl", "GitHub URL", {
-								placeholder: "https://github.com/org/repo",
-							})}
+						<div className="space-y-3">
+							<div className="grid grid-cols-2 gap-3">
+								{field("repositoryPath", "Repository path", {
+									placeholder: "/path/to/repo",
+								})}
+								{field("baseBranch", "Base branch", { placeholder: "main" })}
+							</div>
+							<div className="grid grid-cols-2 gap-3">
+								{field("workspaceBaseDir", "Workspace base dir", {
+									placeholder: "/path/to/worktrees",
+								})}
+								{field("githubUrl", "GitHub URL", {
+									placeholder: "https://github.com/org/repo",
+								})}
+							</div>
 						</div>
 					</section>
+
+					<hr className="border-border" />
 
 					{/* Linear */}
 					<section>
-						<h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
+						<h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-3">
 							Linear
 						</h3>
-						<div className="space-y-2">
-							{field("linearWorkspaceId", "Workspace ID")}
-							{field("linearWorkspaceName", "Workspace name")}
-							<div>
-								<label className="block text-xs font-medium mb-1">
-									Team keys
-								</label>
-								<TagInput
-									value={form.teamKeys as string[]}
-									onChange={(v) => set("teamKeys", v.length ? v : undefined)}
-								/>
+						<div className="space-y-3">
+							<div className="grid grid-cols-2 gap-3">
+								{field("linearWorkspaceId", "Workspace ID")}
+								{field("linearWorkspaceName", "Workspace name")}
 							</div>
-							<div>
-								<label className="block text-xs font-medium mb-1">
-									Routing labels
-								</label>
-								<TagInput
-									value={form.routingLabels as string[]}
-									onChange={(v) =>
-										set("routingLabels", v.length ? v : undefined)
-									}
-								/>
-							</div>
-							<div>
-								<label className="block text-xs font-medium mb-1">
-									Project keys
-								</label>
-								<TagInput
-									value={form.projectKeys as string[]}
-									onChange={(v) => set("projectKeys", v.length ? v : undefined)}
-								/>
+							<div className="grid grid-cols-3 gap-3">
+								<div>
+									<label className="block text-xs font-medium mb-1">
+										Team keys
+									</label>
+									<TagInput
+										value={form.teamKeys as string[]}
+										onChange={(v) => set("teamKeys", v.length ? v : undefined)}
+									/>
+								</div>
+								<div>
+									<label className="block text-xs font-medium mb-1">
+										Routing labels
+									</label>
+									<TagInput
+										value={form.routingLabels as string[]}
+										onChange={(v) =>
+											set("routingLabels", v.length ? v : undefined)
+										}
+									/>
+								</div>
+								<div>
+									<label className="block text-xs font-medium mb-1">
+										Project keys
+									</label>
+									<TagInput
+										value={form.projectKeys as string[]}
+										onChange={(v) =>
+											set("projectKeys", v.length ? v : undefined)
+										}
+									/>
+								</div>
 							</div>
 						</div>
 					</section>
+
+					<hr className="border-border" />
 
 					{/* Runner & Tools */}
 					<section>
-						<h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
+						<h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-3">
 							Runner & Tools
 						</h3>
-						<div className="space-y-2">
-							{field("model", "Model override", {
-								placeholder: "e.g. claude-opus-4-5",
-							})}
-							{field("fallbackModel", "Fallback model")}
-							<div>
-								<label className="block text-xs font-medium mb-1">
-									Allowed tools
-								</label>
-								<TagInput
-									value={form.allowedTools as string[]}
-									onChange={(v) =>
-										set("allowedTools", v.length ? v : undefined)
-									}
-								/>
+						<div className="space-y-3">
+							<div className="grid grid-cols-2 gap-3">
+								{field("model", "Model override", {
+									placeholder: "e.g. claude-opus-4-5",
+								})}
+								{field("fallbackModel", "Fallback model")}
 							</div>
-							<div>
-								<label className="block text-xs font-medium mb-1">
-									Disallowed tools
-								</label>
-								<TagInput
-									value={form.disallowedTools as string[]}
-									onChange={(v) =>
-										set("disallowedTools", v.length ? v : undefined)
-									}
-								/>
+							<div className="grid grid-cols-2 gap-3">
+								<div>
+									<label className="block text-xs font-medium mb-1">
+										Allowed tools
+									</label>
+									<TagInput
+										value={form.allowedTools as string[]}
+										onChange={(v) =>
+											set("allowedTools", v.length ? v : undefined)
+										}
+									/>
+								</div>
+								<div>
+									<label className="block text-xs font-medium mb-1">
+										Disallowed tools
+									</label>
+									<TagInput
+										value={form.disallowedTools as string[]}
+										onChange={(v) =>
+											set("disallowedTools", v.length ? v : undefined)
+										}
+									/>
+								</div>
 							</div>
 						</div>
 					</section>
 
+					<hr className="border-border" />
+
 					{/* Label Branch Config */}
 					<section>
-						<h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
+						<h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1">
 							Label Branch Config
 						</h3>
-						<p className="text-xs text-muted-foreground mb-2">
+						<p className="text-xs text-muted-foreground mb-3">
 							Map Linear labels to a base branch and/or branch name prefix.
 						</p>
 						<LabelBranchEditor
@@ -306,16 +350,20 @@ function RepoSlideOver({
 						/>
 					</section>
 
+					<hr className="border-border" />
+
 					{/* Advanced */}
 					<section>
-						<h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
+						<h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-3">
 							Advanced
 						</h3>
-						<div className="space-y-2">
-							{field("mcpConfigPath", "MCP config path(s)", {
-								placeholder: "/path/to/mcp.json",
-							})}
-							{field("promptTemplatePath", "Prompt template path")}
+						<div className="space-y-3">
+							<div className="grid grid-cols-2 gap-3">
+								{field("mcpConfigPath", "MCP config path(s)", {
+									placeholder: "/path/to/mcp.json",
+								})}
+								{field("promptTemplatePath", "Prompt template path")}
+							</div>
 							<div>
 								<label className="block text-xs font-medium mb-1">
 									Append instruction
@@ -344,7 +392,9 @@ function RepoSlideOver({
 						</div>
 					</section>
 				</div>
-				<div className="px-5 py-4 border-t flex justify-end gap-2 sticky bottom-0 bg-background">
+
+				{/* Footer */}
+				<div className="px-6 py-4 border-t flex justify-end gap-2">
 					<button
 						onClick={onClose}
 						className="px-4 py-1.5 border rounded-md text-sm hover:bg-muted transition-colors"
@@ -481,7 +531,7 @@ export function RepositoriesPage() {
 			)}
 
 			{editingRepo !== null && (
-				<RepoSlideOver
+				<RepoModal
 					repo={editingRepo === "new" ? null : editingRepo}
 					onClose={() => setEditingRepo(null)}
 					onSave={(r) => saveMut.mutate(r)}

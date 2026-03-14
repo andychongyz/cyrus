@@ -5,6 +5,37 @@ This changelog documents internal development changes, refactors, tooling update
 ## [Unreleased]
 
 ### Fixed
+- Reworked `handleIssueContentUpdate()` in `EdgeWorker.ts` to be streaming-only: issue update events are now ONLY delivered to currently running sessions via `addStreamMessage()`. Idle sessions are no longer resumed. If the runner doesn't support streaming input, the event is silently ignored. Added webhook deduplication using `createdAt:issueId` composite key with bounded `processedIssueUpdateKeys` set (auto-prunes at 500 entries). Added DEBUG-level logging that traces the webhook key and changed fields for each delivery. Replaced 5 tests with 7 tests in `EdgeWorker.issue-update-multiple-sessions.test.ts`. ([CYPACK-954](https://linear.app/ceedar/issue/CYPACK-954), [#977](https://github.com/ceedaragents/cyrus/pull/977))
+
+### Added
+- Added JSON Schema export pipeline for config schemas (`EdgeConfigSchema`, `RepositoryConfigSchema`, etc.) via `pnpm generate:json-schema` in cyrus-core. Generates JSON Schema files in `packages/core/schemas/` using Zod v4's native `.toJSONSchema()`. Includes 16 sync/structure tests, `tsx` devDependency, and a pre-commit hook that blocks commits when `config-schemas.ts` changes without regenerating schemas. ([CYPACK-935](https://linear.app/ceedar/issue/CYPACK-935), [#973](https://github.com/ceedaragents/cyrus/pull/973))
+
+## [0.2.33] - 2026-03-10
+
+### Fixed
+- ClaudeRunner now infers `type: "http"` for file-loaded MCP server configs that have a `url` but no `type` discriminator. The Claude Agent SDK requires an explicit `type` field — without it, sessions crash with 0 messages. Codex/Gemini runners are unaffected because they do property-based translation. ([#966](https://github.com/ceedaragents/cyrus/pull/966))
+
+### Changed
+- Replaced placeholder `testMcp` handler with actual MCP SDK integration: stdio spawns via `StdioClientTransport`, HTTP/SSE connects via `StreamableHTTPClientTransport`, both perform `tools/list` and return discovered tools. Added `@modelcontextprotocol/sdk` dependency to config-updater and `NodeNext` module resolution. ([#966](https://github.com/ceedaragents/cyrus/pull/966))
+- Refactored MCP test handler: fixed `withTimeout` timer leak by clearing setTimeout on settlement, extracted `connectAndDiscover()` to eliminate duplicated connect/list/respond logic, avoided mutating `payload.commandArgs` by copying before sort, added 5s timeout to `client.close()` to prevent zombie stdio processes. ([#966](https://github.com/ceedaragents/cyrus/pull/966))
+- MCP config files moved to `~/.cyrus/mcp-configs/` subdirectory; config-updater routes consolidated under `/api/update/` prefix. ([#966](https://github.com/ceedaragents/cyrus/pull/966))
+- Restored tab indentation in all package.json files.
+
+## [0.2.32] - 2026-03-10
+
+### Changed
+- **Consolidated parent-child session mapping to single source of truth** - Removed redundant `EdgeWorker.childToParentAgentSession` map. `GlobalSessionRegistry` is now the sole owner of parent-child session mappings, eliminating the dual-write obligation that caused the orchestrator result-writing regression. Serialization format (`childToParentAgentSession` key) preserved for backward compatibility. ([CYPACK-922](https://linear.app/ceedar/issue/CYPACK-922), [#957](https://github.com/ceedaragents/cyrus/pull/957))
+- Moved `linearToken`, `linearRefreshToken`, and `linearWorkspaceSlug` from per-repository/global config into the `linearWorkspaces` map keyed by Linear workspace ID. `EdgeWorker.issueTrackers` now creates one `IIssueTrackerService` per workspace instead of per repository, eliminating redundant Linear clients. Removed `getIssueTrackerForRepository` wrappers from `EdgeWorker` and `ActivityPoster` — callers now use workspace ID directly. `AttachmentService` accepts workspace ID and resolves tokens internally. Includes idempotent config migration, workspace-level OAuth refresh, and updated CLI commands. ([CYPACK-912](https://linear.app/ceedar/issue/CYPACK-912), [#959](https://github.com/ceedaragents/cyrus/pull/959))
+- Updated `issueRepositoryCache` from `Map<issueId, string>` to `Map<issueId, string[]>` for multi-repo session support. Routing now returns `RepositoryConfig[]` instead of a single repository. Description tag parsing supports multiple `[repo=...]` tags, label-based routing returns all matching repos, and no-match cases return `needs_selection` instead of a default fallback. Includes cache serialization migration from `Record<string, string>` to `Record<string, string[]>`. ([CYPACK-915](https://linear.app/ceedar/issue/CYPACK-915), [#961](https://github.com/ceedaragents/cyrus/pull/961))
+
+### Added
+- Added `RepositoryContext` type and `repositories: RepositoryContext[]` field to `CyrusAgentSession`. Each session now explicitly carries its repository context (repositoryId, branchName, baseBranchName). Old sessions without `repositories` default to `[]` on deserialization. ([CYPACK-914](https://linear.app/ceedar/issue/CYPACK-914), [#960](https://github.com/ceedaragents/cyrus/pull/960))
+- Consolidated `AgentSessionManager` from a per-repository `Map<string, AgentSessionManager>` to a single instance in `EdgeWorker`. Activity sink resolution moved from constructor-level to per-session via `setActivitySink()`. Serialization format flattened from nested `{[repoId]: {[sessionId]: session}}` to `{[sessionId]: session}` with persistence version bumped 3.0 → 4.0 (backward-compatible migration). ([CYPACK-911](https://linear.app/ceedar/issue/CYPACK-911), [#955](https://github.com/ceedaragents/cyrus/pull/955))
+
+## [0.2.31] - 2026-03-09
+
+### Fixed
+- Tests now use `mkdtempSync` for unique per-run temp directories (gemini-runner, cursor-runner, edge-worker), avoiding EACCES on shared `/tmp` and preventing simultaneous test runs from different worktrees from competing for the same folders.
 - Added proper handling for `rate_limit_event` messages from Claude runners in `AgentSessionManager` with tiered logging (warn/info/debug by status), and silenced all unhandled informational message types (`rate_limit_event`, `stream_event`, `tool_progress`, `auth_status`, `tool_use_summary`, `prompt_suggestion`) in `ClaudeRunner.processMessage`. ([CYPACK-895](https://linear.app/ceedar/issue/CYPACK-895), [#946](https://github.com/ceedaragents/cyrus/pull/946))
 
 ## [0.2.30] - 2026-03-05

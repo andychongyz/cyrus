@@ -46,11 +46,11 @@ export class ActivityPoster {
 
 	async postInstantAcknowledgment(
 		sessionId: string,
-		repositoryId: string,
+		workspaceId: string,
 	): Promise<void> {
-		const issueTracker = this.issueTrackers.get(repositoryId);
+		const issueTracker = this.issueTrackers.get(workspaceId);
 		if (!issueTracker) {
-			this.logger.warn(`No issue tracker found for repository ${repositoryId}`);
+			this.logger.warn(`No issue tracker found for workspace ${workspaceId}`);
 			return;
 		}
 
@@ -69,11 +69,11 @@ export class ActivityPoster {
 
 	async postParentResumeAcknowledgment(
 		sessionId: string,
-		repositoryId: string,
+		workspaceId: string,
 	): Promise<void> {
-		const issueTracker = this.issueTrackers.get(repositoryId);
+		const issueTracker = this.issueTrackers.get(workspaceId);
 		if (!issueTracker) {
-			this.logger.warn(`No issue tracker found for repository ${repositoryId}`);
+			this.logger.warn(`No issue tracker found for workspace ${workspaceId}`);
 			return;
 		}
 
@@ -89,7 +89,7 @@ export class ActivityPoster {
 
 	async postRepositorySelectionActivity(
 		sessionId: string,
-		repositoryId: string,
+		workspaceId: string,
 		repositoryName: string,
 		selectionMethod:
 			| "description-tag"
@@ -101,9 +101,9 @@ export class ActivityPoster {
 			| "workspace-fallback"
 			| "user-selected",
 	): Promise<void> {
-		const issueTracker = this.issueTrackers.get(repositoryId);
+		const issueTracker = this.issueTrackers.get(workspaceId);
 		if (!issueTracker) {
-			this.logger.warn(`No issue tracker found for repository ${repositoryId}`);
+			this.logger.warn(`No issue tracker found for workspace ${workspaceId}`);
 			return;
 		}
 
@@ -142,11 +142,12 @@ export class ActivityPoster {
 	async postSystemPromptSelectionThought(
 		sessionId: string,
 		labels: string[],
+		workspaceId: string,
 		repositoryId: string,
 	): Promise<void> {
-		const issueTracker = this.issueTrackers.get(repositoryId);
+		const issueTracker = this.issueTrackers.get(workspaceId);
 		if (!issueTracker) {
-			this.logger.warn(`No issue tracker found for repository ${repositoryId}`);
+			this.logger.warn(`No issue tracker found for workspace ${workspaceId}`);
 			return;
 		}
 
@@ -231,12 +232,12 @@ export class ActivityPoster {
 
 	async postInstantPromptedAcknowledgment(
 		sessionId: string,
-		repositoryId: string,
+		workspaceId: string,
 		isStreaming: boolean,
 	): Promise<void> {
-		const issueTracker = this.issueTrackers.get(repositoryId);
+		const issueTracker = this.issueTrackers.get(workspaceId);
 		if (!issueTracker) {
-			this.logger.warn(`No issue tracker found for repository ${repositoryId}`);
+			this.logger.warn(`No issue tracker found for workspace ${workspaceId}`);
 			return;
 		}
 
@@ -257,13 +258,12 @@ export class ActivityPoster {
 	async postComment(
 		issueId: string,
 		body: string,
-		repositoryId: string,
+		workspaceId: string,
 		parentId?: string,
 	): Promise<void> {
-		// Get the issue tracker for this repository
-		const issueTracker = this.issueTrackers.get(repositoryId);
+		const issueTracker = this.issueTrackers.get(workspaceId);
 		if (!issueTracker) {
-			throw new Error(`No issue tracker found for repository ${repositoryId}`);
+			throw new Error(`No issue tracker found for workspace ${workspaceId}`);
 		}
 		const commentInput: { body: string; parentId?: string } = {
 			body,

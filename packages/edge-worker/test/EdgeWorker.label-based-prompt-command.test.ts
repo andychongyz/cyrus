@@ -12,6 +12,7 @@ import { AgentSessionManager } from "../src/AgentSessionManager.js";
 import { EdgeWorker } from "../src/EdgeWorker.js";
 import { SharedApplicationServer } from "../src/SharedApplicationServer.js";
 import type { EdgeWorkerConfig, RepositoryConfig } from "../src/types.js";
+import { TEST_CYRUS_HOME } from "./test-dirs.js";
 
 // Mock fs/promises
 vi.mock("fs/promises", () => ({
@@ -57,7 +58,6 @@ describe("EdgeWorker - Label-Based Prompt Command", () => {
 		repositoryPath: "/test/repo",
 		workspaceBaseDir: "/test/workspaces",
 		baseBranch: "main",
-		linearToken: "test-token",
 		linearWorkspaceId: "test-workspace",
 		isActive: true,
 		allowedTools: ["Read", "Edit"],
@@ -142,6 +142,7 @@ describe("EdgeWorker - Label-Based Prompt Command", () => {
 			postAnalyzingThought: vi.fn().mockResolvedValue(null),
 			postProcedureSelectionThought: vi.fn().mockResolvedValue(undefined),
 			createThoughtActivity: vi.fn().mockResolvedValue(undefined),
+			setActivitySink: vi.fn(),
 			on: vi.fn(), // EventEmitter method
 		};
 		vi.mocked(AgentSessionManager).mockImplementation(
@@ -204,8 +205,11 @@ Issue: {{issue_identifier}}`;
 
 		mockConfig = {
 			proxyUrl: "http://localhost:3000",
-			cyrusHome: "/tmp/test-cyrus-home",
+			cyrusHome: TEST_CYRUS_HOME,
 			repositories: [mockRepository],
+			linearWorkspaces: {
+				"test-workspace": { linearToken: "test-token" },
+			},
 			handlers: {
 				createWorkspace: vi.fn().mockResolvedValue({
 					path: "/test/workspaces/TEST-123",
@@ -223,7 +227,10 @@ Issue: {{issue_identifier}}`;
 			}),
 			getIssueLabels: vi.fn().mockResolvedValue([{ name: "bug" }]),
 		};
-		(edgeWorker as any).issueTrackers.set(mockRepository.id, mockIssueTracker);
+		(edgeWorker as any).issueTrackers.set(
+			mockRepository.linearWorkspaceId,
+			mockIssueTracker,
+		);
 	});
 
 	afterEach(() => {

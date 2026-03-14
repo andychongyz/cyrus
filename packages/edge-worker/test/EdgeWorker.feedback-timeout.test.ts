@@ -7,6 +7,7 @@ import { AgentSessionManager } from "../src/AgentSessionManager.js";
 import { EdgeWorker } from "../src/EdgeWorker.js";
 import { SharedApplicationServer } from "../src/SharedApplicationServer.js";
 import type { EdgeWorkerConfig, RepositoryConfig } from "../src/types.js";
+import { TEST_CYRUS_HOME } from "./test-dirs.js";
 
 // Mock all dependencies
 vi.mock("fs/promises");
@@ -44,7 +45,6 @@ describe("EdgeWorker - Feedback Delivery Timeout Issue", () => {
 		repositoryPath: "/test/repo",
 		workspaceBaseDir: "/test/workspaces",
 		baseBranch: "main",
-		linearToken: "test-token",
 		linearWorkspaceId: "test-workspace",
 		isActive: true,
 		allowedTools: ["Read", "Edit"],
@@ -158,8 +158,11 @@ describe("EdgeWorker - Feedback Delivery Timeout Issue", () => {
 
 		mockConfig = {
 			proxyUrl: "http://localhost:3000",
-			cyrusHome: "/tmp/test-cyrus-home",
+			cyrusHome: TEST_CYRUS_HOME,
 			repositories: [mockRepository],
+			linearWorkspaces: {
+				"test-workspace": { linearToken: "test-token" },
+			},
 			handlers: {
 				createWorkspace: vi.fn().mockResolvedValue({
 					path: "/test/workspaces/CHILD-456",
@@ -170,16 +173,17 @@ describe("EdgeWorker - Feedback Delivery Timeout Issue", () => {
 
 		edgeWorker = new EdgeWorker(mockConfig);
 
-		// Setup parent-child mapping
-		(edgeWorker as any).childToParentAgentSession.set(
+		// Setup parent-child mapping in GlobalSessionRegistry (single source of truth)
+		(edgeWorker as any).globalSessionRegistry.setParentSession(
 			"child-session-456",
 			"parent-session-123",
 		);
 
-		// Setup repository managers
-		(edgeWorker as any).agentSessionManagers.set(
+		// Setup single agent session manager and session-to-repo mapping
+		(edgeWorker as any).agentSessionManager = mockChildAgentSessionManager;
+		(edgeWorker as any).sessionRepositories.set(
+			"child-session-456",
 			"test-repo",
-			mockChildAgentSessionManager,
 		);
 		(edgeWorker as any).repositories.set("test-repo", mockRepository);
 	});

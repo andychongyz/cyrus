@@ -36,6 +36,7 @@ vi.mock("../src/AgentSessionManager.js", () => ({
 		createLinearAgentSession: vi.fn(),
 		getSession: vi.fn(),
 		getActiveSessionsByIssueId: vi.fn().mockReturnValue([]),
+		setActivitySink: vi.fn(),
 		on: vi.fn(), // EventEmitter method
 		emit: vi.fn(), // EventEmitter method
 	})),
@@ -74,7 +75,6 @@ describe("EdgeWorker - Version Endpoint", () => {
 		repositoryPath: "/test/repo",
 		workspaceBaseDir: "/test/workspaces",
 		baseBranch: "main",
-		linearToken: "test-token",
 		linearWorkspaceId: "test-workspace",
 		isActive: true,
 	};
@@ -91,6 +91,9 @@ describe("EdgeWorker - Version Endpoint", () => {
 			platform: "linear",
 			cyrusHome: "/test/.cyrus",
 			repositories: [mockRepository],
+			linearWorkspaces: {
+				"test-workspace": { linearToken: "test-token" },
+			},
 		};
 	});
 

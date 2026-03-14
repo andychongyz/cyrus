@@ -6,6 +6,7 @@ import type {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EdgeWorker } from "../src/EdgeWorker";
 import type { EdgeWorkerConfig } from "../src/types";
+import { TEST_CYRUS_HOME } from "./test-dirs.js";
 
 // Mock fs/promises
 vi.mock("node:fs/promises", () => ({
@@ -32,18 +33,20 @@ describe("EdgeWorker - Native Attachments", () => {
 	beforeEach(() => {
 		mockConfig = {
 			proxyUrl: "http://localhost:3000",
-			cyrusHome: "/tmp/test-cyrus-home",
+			cyrusHome: TEST_CYRUS_HOME,
 			repositories: [
 				{
 					id: "test-repo",
 					name: "test-repo",
 					repositoryPath: "/test/repo",
 					workspaceBaseDir: "/test/workspaces",
-					linearToken: "test-token",
 					linearWorkspaceId: "test-workspace",
 					baseBranch: "main",
 				},
 			],
+			linearWorkspaces: {
+				"test-workspace": { linearToken: "test-token" },
+			},
 		};
 
 		edgeWorker = new EdgeWorker(mockConfig);
@@ -85,7 +88,7 @@ describe("EdgeWorker - Native Attachments", () => {
 			const mockIssueTracker = {
 				getComments: vi.fn().mockResolvedValue([]),
 			};
-			(edgeWorker as any).issueTrackers.set("test-repo", mockIssueTracker);
+			(edgeWorker as any).issueTrackers.set("test-workspace", mockIssueTracker);
 
 			// Call the method
 			const result = await (edgeWorker as any).downloadIssueAttachments(
@@ -123,7 +126,7 @@ describe("EdgeWorker - Native Attachments", () => {
 			const mockIssueTracker = {
 				getComments: vi.fn().mockResolvedValue([]),
 			};
-			(edgeWorker as any).issueTrackers.set("test-repo", mockIssueTracker);
+			(edgeWorker as any).issueTrackers.set("test-workspace", mockIssueTracker);
 
 			const result = await (edgeWorker as any).downloadIssueAttachments(
 				mockIssue,
@@ -150,7 +153,7 @@ describe("EdgeWorker - Native Attachments", () => {
 			const mockIssueTracker = {
 				getComments: vi.fn().mockResolvedValue([]),
 			};
-			(edgeWorker as any).issueTrackers.set("test-repo", mockIssueTracker);
+			(edgeWorker as any).issueTrackers.set("test-workspace", mockIssueTracker);
 
 			// Should not throw, but handle gracefully
 			const result = await (edgeWorker as any).downloadIssueAttachments(

@@ -8,6 +8,7 @@ import { AgentSessionManager } from "../src/AgentSessionManager.js";
 import { EdgeWorker } from "../src/EdgeWorker.js";
 import { SharedApplicationServer } from "../src/SharedApplicationServer.js";
 import type { EdgeWorkerConfig, RepositoryConfig } from "../src/types.js";
+import { TEST_CYRUS_HOME } from "./test-dirs.js";
 
 // Mock dependencies
 vi.mock("cyrus-claude-runner");
@@ -27,7 +28,7 @@ vi.mock("cyrus-core", async (importOriginal) => {
 });
 vi.mock("file-type");
 
-describe("EdgeWorker - fetchPRBranchRef", () => {
+describe("EdgeWorker - fetchPRBranchRefs", () => {
 	let edgeWorker: EdgeWorker;
 	let mockConfig: EdgeWorkerConfig;
 	let mockLinearClient: any;
@@ -70,6 +71,8 @@ describe("EdgeWorker - fetchPRBranchRef", () => {
 			recordThought: vi.fn().mockResolvedValue(undefined),
 			recordAction: vi.fn().mockResolvedValue(undefined),
 			completeSession: vi.fn().mockResolvedValue(undefined),
+			setActivitySink: vi.fn(),
+			on: vi.fn(),
 		};
 		vi.mocked(AgentSessionManager).mockImplementation(
 			() => mockAgentSessionManager,
@@ -96,7 +99,7 @@ describe("EdgeWorker - fetchPRBranchRef", () => {
 
 		// Create EdgeWorker config
 		mockConfig = {
-			cyrusHome: "/tmp/test-cyrus-home",
+			cyrusHome: TEST_CYRUS_HOME,
 			repositories: [],
 		};
 
@@ -106,7 +109,6 @@ describe("EdgeWorker - fetchPRBranchRef", () => {
 			name: "my-repo",
 			cloneUrl: "https://github.com/testorg/my-repo.git",
 			basePath: "/tmp/test-repos",
-			linearToken: "test-linear-token",
 			primaryBranch: "main",
 		};
 
@@ -134,18 +136,21 @@ describe("EdgeWorker - fetchPRBranchRef", () => {
 					head: {
 						ref: "fix-tests",
 					},
+					base: {
+						ref: "main",
+					},
 				}),
 			});
 			global.fetch = mockFetch;
 
-			// Call fetchPRBranchRef via reflection (it's private)
-			const result = await (edgeWorker as any).fetchPRBranchRef(
+			// Call fetchPRBranchRefs via reflection (it's private)
+			const result = await (edgeWorker as any).fetchPRBranchRefs(
 				eventWithToken,
 				mockRepository,
 			);
 
 			// Verify the result
-			expect(result).toBe("fix-tests");
+			expect(result).toEqual({ headRef: "fix-tests", baseRef: "main" });
 
 			// THIS IS THE FAILING ASSERTION - the current implementation uses process.env.GITHUB_TOKEN
 			// but it SHOULD use event.installationToken
@@ -179,18 +184,21 @@ describe("EdgeWorker - fetchPRBranchRef", () => {
 					head: {
 						ref: "fix-tests",
 					},
+					base: {
+						ref: "develop",
+					},
 				}),
 			});
 			global.fetch = mockFetch;
 
-			// Call fetchPRBranchRef
-			const result = await (edgeWorker as any).fetchPRBranchRef(
+			// Call fetchPRBranchRefs
+			const result = await (edgeWorker as any).fetchPRBranchRefs(
 				eventWithoutToken,
 				mockRepository,
 			);
 
 			// Verify the result
-			expect(result).toBe("fix-tests");
+			expect(result).toEqual({ headRef: "fix-tests", baseRef: "develop" });
 
 			// Verify it used the environment variable
 			expect(mockFetch).toHaveBeenCalledWith(
@@ -226,8 +234,8 @@ describe("EdgeWorker - fetchPRBranchRef", () => {
 			});
 			global.fetch = mockFetch;
 
-			// Call fetchPRBranchRef
-			const result = await (edgeWorker as any).fetchPRBranchRef(
+			// Call fetchPRBranchRefs
+			const result = await (edgeWorker as any).fetchPRBranchRefs(
 				eventWithoutToken,
 				mockRepository,
 			);

@@ -1,16 +1,18 @@
 {
 	"name": "cyrus-core",
-	"version": "0.2.30",
+	"version": "0.2.33",
 	"description": "Core business logic for Cyrus",
 	"type": "module",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
 	"files": [
-		"dist"
+		"dist",
+		"schemas"
 	],
 	"scripts": {
 		"build": "tsc",
 		"dev": "tsc --watch",
+		"generate:json-schema": "tsx scripts/export-json-schema.ts && biome format --write schemas/",
 		"test": "vitest",
 		"test:run": "vitest run --passWithNoTests",
 		"typecheck": "tsc --noEmit"
@@ -22,7 +24,8 @@
 	},
 	"devDependencies": {
 		"@types/node": "^20.0.0",
-		"fastify": "^5.7.3",
+		"fastify": "^5.8.1",
+		"tsx": "^4.20.6",
 		"typescript": "^5.3.3",
 		"vitest": "^3.1.4"
 	},

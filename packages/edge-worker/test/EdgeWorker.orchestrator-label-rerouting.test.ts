@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "../src/AgentSessionManager.js";
 import { EdgeWorker } from "../src/EdgeWorker.js";
 import type { EdgeWorkerConfig, RepositoryConfig } from "../src/types.js";
+import { TEST_CYRUS_HOME } from "./test-dirs.js";
 
 // Mock dependencies
 vi.mock("@linear/sdk");
@@ -35,7 +36,6 @@ describe("EdgeWorker - Orchestrator Label Rerouting", () => {
 		repositoryPath: "/test/repo",
 		workspaceBaseDir: "/test/workspaces",
 		baseBranch: "main",
-		linearToken: "test-token",
 		linearWorkspaceId: "test-workspace",
 		isActive: true,
 		allowedTools: ["Read", "Edit"],
@@ -81,6 +81,7 @@ describe("EdgeWorker - Orchestrator Label Rerouting", () => {
 			postProcedureSelectionThought: vi.fn().mockResolvedValue(undefined),
 			postAnalyzingThought: vi.fn().mockResolvedValue(undefined),
 			createThoughtActivity: vi.fn().mockResolvedValue(undefined),
+			setActivitySink: vi.fn(),
 			on: vi.fn(), // EventEmitter method
 		};
 		vi.mocked(AgentSessionManager).mockImplementation(
@@ -89,8 +90,11 @@ describe("EdgeWorker - Orchestrator Label Rerouting", () => {
 
 		mockConfig = {
 			proxyUrl: "http://localhost:3000",
-			cyrusHome: "/tmp/test-cyrus-home",
+			cyrusHome: TEST_CYRUS_HOME,
 			repositories: [mockRepository],
+			linearWorkspaces: {
+				"test-workspace": { linearToken: "test-token" },
+			},
 			handlers: {
 				createWorkspace: vi.fn().mockResolvedValue({
 					path: "/test/workspaces/TEST-123",
@@ -531,7 +535,6 @@ Work completed on subtask TEST-124.
 				repositoryPath: "/test/repo",
 				workspaceBaseDir: "/test/workspaces",
 				baseBranch: "main",
-				linearToken: "test-token",
 				linearWorkspaceId: "test-workspace",
 				isActive: true,
 				allowedTools: ["Read", "Edit"],
@@ -541,8 +544,11 @@ Work completed on subtask TEST-124.
 			// Create new EdgeWorker with the config that has no orchestrator labelPrompts
 			const configWithoutOrchestratorLabels: EdgeWorkerConfig = {
 				proxyUrl: "http://localhost:3000",
-				cyrusHome: "/tmp/test-cyrus-home",
+				cyrusHome: TEST_CYRUS_HOME,
 				repositories: [repositoryWithoutOrchestratorConfig],
+				linearWorkspaces: {
+					"test-workspace": { linearToken: "test-token" },
+				},
 				handlers: {
 					createWorkspace: vi.fn().mockResolvedValue({
 						path: "/test/workspaces/TEST-123",
@@ -625,7 +631,6 @@ Work completed on subtask TEST-124.
 				repositoryPath: "/test/repo",
 				workspaceBaseDir: "/test/workspaces",
 				baseBranch: "main",
-				linearToken: "test-token",
 				linearWorkspaceId: "test-workspace",
 				isActive: true,
 				allowedTools: ["Read", "Edit"],
@@ -635,8 +640,11 @@ Work completed on subtask TEST-124.
 			// Create new EdgeWorker with the config that has no orchestrator labelPrompts
 			const configWithoutOrchestratorLabels: EdgeWorkerConfig = {
 				proxyUrl: "http://localhost:3000",
-				cyrusHome: "/tmp/test-cyrus-home",
+				cyrusHome: TEST_CYRUS_HOME,
 				repositories: [repositoryWithoutOrchestratorConfig],
+				linearWorkspaces: {
+					"test-workspace": { linearToken: "test-token" },
+				},
 				handlers: {
 					createWorkspace: vi.fn().mockResolvedValue({
 						path: "/test/workspaces/TEST-123",
@@ -719,7 +727,6 @@ Work completed on subtask TEST-124.
 				repositoryPath: "/test/repo",
 				workspaceBaseDir: "/test/workspaces",
 				baseBranch: "main",
-				linearToken: "test-token",
 				linearWorkspaceId: "test-workspace",
 				isActive: true,
 				allowedTools: ["Read", "Edit"],
@@ -729,8 +736,11 @@ Work completed on subtask TEST-124.
 			// Create new EdgeWorker with the config that has no orchestrator labelPrompts
 			const configWithoutOrchestratorLabels: EdgeWorkerConfig = {
 				proxyUrl: "http://localhost:3000",
-				cyrusHome: "/tmp/test-cyrus-home",
+				cyrusHome: TEST_CYRUS_HOME,
 				repositories: [repositoryWithoutOrchestratorConfig],
+				linearWorkspaces: {
+					"test-workspace": { linearToken: "test-token" },
+				},
 				handlers: {
 					createWorkspace: vi.fn().mockResolvedValue({
 						path: "/test/workspaces/TEST-123",

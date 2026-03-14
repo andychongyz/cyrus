@@ -74,7 +74,7 @@ export class WorkerService {
 			"   Routes: /api/update/cyrus-config, /api/update/cyrus-env,",
 		);
 		this.logger.info(
-			"           /api/update/repository, /api/test-mcp, /api/configure-mcp",
+			"           /api/update/repository, /api/update/test-mcp, /api/update/configure-mcp",
 		);
 
 		// Start the server (this also starts Cloudflare tunnel if CLOUDFLARE_TOKEN is set)
@@ -133,7 +133,7 @@ export class WorkerService {
 			"   Routes: /api/update/cyrus-config, /api/update/cyrus-env,",
 		);
 		this.logger.info(
-			"           /api/update/repository, /api/test-mcp, /api/configure-mcp",
+			"           /api/update/repository, /api/update/test-mcp, /api/update/configure-mcp",
 		);
 
 		// Start the server (this also starts Cloudflare tunnel if CLOUDFLARE_TOKEN is set)
@@ -223,9 +223,9 @@ export class WorkerService {
 					| "codex"
 					| "cursor"
 					| undefined) || edgeConfig.defaultRunner,
-			linearWorkspaceSlug: edgeConfig.linearWorkspaceSlug,
 			issueUpdateTrigger: edgeConfig.issueUpdateTrigger,
 			promptDefaults: edgeConfig.promptDefaults,
+			linearWorkspaces: edgeConfig.linearWorkspaces,
 			webhookBaseUrl: process.env.CYRUS_BASE_URL,
 			serverPort: parsePort(process.env.CYRUS_SERVER_PORT, DEFAULT_SERVER_PORT),
 			serverHost: isExternalHost ? "0.0.0.0" : "localhost",

@@ -47,9 +47,24 @@ export class CheckTokensCommand extends BaseCommand {
 
 		console.log("Checking Linear tokens...\n");
 
+		// Check tokens at the workspace level
+		const checkedWorkspaces = new Set<string>();
 		for (const repo of config.repositories) {
-			process.stdout.write(`${repo.name} (${repo.linearWorkspaceName}): `);
-			const result = await checkLinearToken(repo.linearToken);
+			const workspaceId = repo.linearWorkspaceId;
+			if (!workspaceId) continue;
+			if (checkedWorkspaces.has(workspaceId)) continue;
+			checkedWorkspaces.add(workspaceId);
+
+			const token = config.linearWorkspaces?.[workspaceId]?.linearToken;
+			const workspaceName =
+				config.linearWorkspaces?.[workspaceId]?.linearWorkspaceName ||
+				workspaceId;
+			process.stdout.write(`Workspace ${workspaceName}: `);
+			if (!token) {
+				console.log(`❌ No token configured`);
+				continue;
+			}
+			const result = await checkLinearToken(token);
 
 			if (result.valid) {
 				console.log("✅ Valid");

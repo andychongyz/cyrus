@@ -125,6 +125,19 @@ const PromptDefaultsSchema = z.object({
 });
 
 /**
+ * Configuration for a Linear workspace's credentials.
+ * Keyed by workspace ID in EdgeConfig.linearWorkspaces.
+ */
+export const LinearWorkspaceConfigSchema = z.object({
+	linearToken: z.string(),
+	linearRefreshToken: z.string().optional(),
+	/** Linear workspace URL slug (e.g., "ceedar" from "https://linear.app/ceedar/...") */
+	linearWorkspaceSlug: z.string().optional(),
+	/** Human-readable workspace name (e.g., "Ceedar") */
+	linearWorkspaceName: z.string().optional(),
+});
+
+/**
  * Configuration for a single repository/workspace pair
  */
 export const RepositoryConfigSchema = z.object({
@@ -137,14 +150,18 @@ export const RepositoryConfigSchema = z.object({
 	baseBranch: z.string(),
 	githubUrl: z.string().optional(),
 
-	// Linear configuration
-	linearWorkspaceId: z.string(),
-	linearWorkspaceName: z.string().optional(),
-	linearToken: z.string(),
-	linearRefreshToken: z.string().optional(),
+	// Linear configuration (optional — repos may operate without Linear, e.g. via Slack or GitHub)
+	linearWorkspaceId: z.string().optional(),
 	teamKeys: z.array(z.string()).optional(),
 	routingLabels: z.array(z.string()).optional(),
 	projectKeys: z.array(z.string()).optional(),
+
+	/** @deprecated Use EdgeConfig.linearWorkspaces[workspaceId].linearToken */
+	linearToken: z.string().optional(),
+	/** @deprecated Use EdgeConfig.linearWorkspaces[workspaceId].linearRefreshToken */
+	linearRefreshToken: z.string().optional(),
+	/** @deprecated Use EdgeConfig.linearWorkspaces[workspaceId].linearWorkspaceName */
+	linearWorkspaceName: z.string().optional(),
 
 	// Workspace configuration
 	workspaceBaseDir: z.string(),
@@ -190,14 +207,22 @@ export const EdgeConfigSchema = z.object({
 	/** Array of repository configurations */
 	repositories: z.array(RepositoryConfigSchema),
 
+	/**
+	 * Linear workspace credentials keyed by workspace ID.
+	 * Centralizes tokens that were previously duplicated per-repository.
+	 */
+	linearWorkspaces: z
+		.record(z.string(), LinearWorkspaceConfigSchema)
+		.optional(),
+
+	/** @deprecated Migrated into linearWorkspaces entries. */
+	linearWorkspaceSlug: z.string().optional(),
+
 	/** Ngrok auth token for tunnel creation */
 	ngrokAuthToken: z.string().optional(),
 
 	/** Stripe customer ID for billing */
 	stripeCustomerId: z.string().optional(),
-
-	/** Linear workspace URL slug (e.g., "ceedar" from "https://linear.app/ceedar/...") */
-	linearWorkspaceSlug: z.string().optional(),
 
 	/** Default Claude model to use across all repositories (e.g., "opus", "sonnet", "haiku") */
 	claudeDefaultModel: z.string().optional(),
@@ -272,14 +297,109 @@ export const EdgeConfigPayloadSchema = EdgeConfigSchema.extend({
 	repositories: z.array(RepositoryConfigPayloadSchema),
 });
 
+/**
+ * Migrate an EdgeConfig from the legacy per-repo token format to the
+ * workspace-keyed format.
+ *
+ * Old format: each repository has linearToken and linearRefreshToken.
+ * New format: linearWorkspaces at EdgeConfig level keyed by workspace ID,
+ * repositories no longer carry tokens.
+ *
+ * This function is idempotent — if linearWorkspaces already exists, it
+ * returns the config unchanged.
+ */
+export function migrateEdgeConfig(
+	raw: Record<string, unknown>,
+): Record<string, unknown> {
+	// Already migrated or no repositories — nothing to do
+	if (raw.linearWorkspaces || !Array.isArray(raw.repositories)) {
+		return raw;
+	}
+
+	const repos = raw.repositories as Record<string, unknown>[];
+	const hasLegacyTokens = repos.some((r) => typeof r.linearToken === "string");
+
+	if (!hasLegacyTokens) {
+		return raw;
+	}
+
+	// Build workspace map from per-repo tokens
+	const linearWorkspaces: Record<
+		string,
+		{
+			linearToken: string;
+			linearRefreshToken?: string;
+			linearWorkspaceSlug?: string;
+			linearWorkspaceName?: string;
+		}
+	> = {};
+
+	// Grab the top-level slug (if present) so it can be folded into each workspace
+	const globalSlug = raw.linearWorkspaceSlug as string | undefined;
+
+	for (const repo of repos) {
+		const workspaceId = repo.linearWorkspaceId as string | undefined;
+		const token = repo.linearToken as string | undefined;
+		if (workspaceId && token) {
+			// First repo with this workspace wins (they should all have the same token)
+			if (!linearWorkspaces[workspaceId]) {
+				linearWorkspaces[workspaceId] = {
+					linearToken: token,
+					...(typeof repo.linearRefreshToken === "string"
+						? { linearRefreshToken: repo.linearRefreshToken }
+						: {}),
+					...(globalSlug ? { linearWorkspaceSlug: globalSlug } : {}),
+					...(typeof repo.linearWorkspaceName === "string"
+						? { linearWorkspaceName: repo.linearWorkspaceName }
+						: {}),
+				};
+			}
+		}
+	}
+
+	// Strip legacy token fields and workspace name from repositories
+	const migratedRepos = repos.map((repo) => {
+		const {
+			linearToken: _linearToken,
+			linearRefreshToken: _linearRefreshToken,
+			linearWorkspaceName: _linearWorkspaceName,
+			...rest
+		} = repo;
+		return rest;
+	});
+
+	const { linearWorkspaceSlug: _slug, ...rest } = raw;
+
+	return {
+		...rest,
+		repositories: migratedRepos,
+		linearWorkspaces,
+	};
+}
+
 // Infer types from schemas
 export type UserIdentifier = z.infer<typeof UserIdentifierSchema>;
 export type UserAccessControlConfig = z.infer<
 	typeof UserAccessControlConfigSchema
 >;
+export type LinearWorkspaceConfig = z.infer<typeof LinearWorkspaceConfigSchema>;
 export type RepositoryConfig = z.infer<typeof RepositoryConfigSchema>;
 export type EdgeConfig = z.infer<typeof EdgeConfigSchema>;
 export type RepositoryConfigPayload = z.infer<
 	typeof RepositoryConfigPayloadSchema
 >;
 export type EdgeConfigPayload = z.infer<typeof EdgeConfigPayloadSchema>;
+
+/**
+ * Assert that a repository has a Linear workspace ID and return it.
+ * Use this in code paths that are only reached for Linear-linked repositories
+ * (e.g. webhook handlers routed via workspace ID).
+ */
+export function requireLinearWorkspaceId(repo: RepositoryConfig): string {
+	if (!repo.linearWorkspaceId) {
+		throw new Error(
+			`Repository "${repo.name}" is not linked to a Linear workspace`,
+		);
+	}
+	return repo.linearWorkspaceId;
+}

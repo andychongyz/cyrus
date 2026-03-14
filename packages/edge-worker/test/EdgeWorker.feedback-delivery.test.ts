@@ -7,6 +7,7 @@ import { AgentSessionManager } from "../src/AgentSessionManager.js";
 import { EdgeWorker } from "../src/EdgeWorker.js";
 import { SharedApplicationServer } from "../src/SharedApplicationServer.js";
 import type { EdgeWorkerConfig, RepositoryConfig } from "../src/types.js";
+import { TEST_CYRUS_HOME } from "./test-dirs.js";
 
 // Mock all dependencies
 vi.mock("fs/promises");
@@ -44,7 +45,6 @@ describe("EdgeWorker - Feedback Delivery", () => {
 		repositoryPath: "/test/repo",
 		workspaceBaseDir: "/test/workspaces",
 		baseBranch: "main",
-		linearToken: "test-token",
 		linearWorkspaceId: "test-workspace",
 		isActive: true,
 		allowedTools: ["Read", "Edit"],
@@ -156,8 +156,11 @@ describe("EdgeWorker - Feedback Delivery", () => {
 
 		mockConfig = {
 			proxyUrl: "http://localhost:3000",
-			cyrusHome: "/tmp/test-cyrus-home",
+			cyrusHome: TEST_CYRUS_HOME,
 			repositories: [mockRepository],
+			linearWorkspaces: {
+				"test-workspace": { linearToken: "test-token" },
+			},
 			handlers: {
 				createWorkspace: vi.fn().mockResolvedValue({
 					path: "/test/workspaces/CHILD-456",
@@ -173,16 +176,17 @@ describe("EdgeWorker - Feedback Delivery", () => {
 			.spyOn(edgeWorker as any, "resumeAgentSession")
 			.mockResolvedValue(undefined);
 
-		// Setup parent-child mapping
-		(edgeWorker as any).childToParentAgentSession.set(
+		// Setup parent-child mapping in GlobalSessionRegistry (single source of truth)
+		(edgeWorker as any).globalSessionRegistry.setParentSession(
 			"child-session-456",
 			"parent-session-123",
 		);
 
-		// Setup repository managers
-		(edgeWorker as any).agentSessionManagers.set(
+		// Setup single agent session manager and session-to-repo mapping
+		(edgeWorker as any).agentSessionManager = mockChildAgentSessionManager;
+		(edgeWorker as any).sessionRepositories.set(
+			"child-session-456",
 			"test-repo",
-			mockChildAgentSessionManager,
 		);
 		(edgeWorker as any).repositories.set("test-repo", mockRepository);
 	});
@@ -255,8 +259,11 @@ describe("EdgeWorker - Feedback Delivery", () => {
 		});
 
 		it("should handle feedback delivery when parent session ID is unknown", async () => {
-			// Arrange - Remove parent mapping to test unknown parent scenario
-			(edgeWorker as any).childToParentAgentSession.delete("child-session-456");
+			// Arrange - Replace registry with a fresh one (no parent mapping)
+			const { GlobalSessionRegistry } = await import(
+				"../src/GlobalSessionRegistry.js"
+			);
+			(edgeWorker as any).globalSessionRegistry = new GlobalSessionRegistry();
 
 			const childSessionId = "child-session-456";
 			const feedbackMessage = "Test feedback without known parent";
@@ -380,28 +387,8 @@ describe("EdgeWorker - Feedback Delivery", () => {
 			);
 		});
 
-		it("should find child session across multiple repositories", async () => {
-			// Arrange - Setup multiple repositories
-			const repo2: RepositoryConfig = {
-				...mockRepository,
-				id: "test-repo-2",
-				name: "Test Repo 2",
-			};
-
-			const mockRepo2Manager = {
-				hasAgentRunner: vi.fn().mockReturnValue(false),
-				getSession: vi.fn().mockReturnValue(null),
-			};
-
-			// First repository doesn't have the session
-			(edgeWorker as any).agentSessionManagers.set(
-				"test-repo-2",
-				mockRepo2Manager,
-			);
-			(edgeWorker as any).repositories.set("test-repo-2", repo2);
-
-			// Adjust mock to make first repo not have it, second repo has it
-			mockRepo2Manager.hasAgentRunner.mockReturnValue(false);
+		it("should find child session via single session manager and sessionRepositories mapping", async () => {
+			// Arrange - The single ASM has the child session runner
 			mockChildAgentSessionManager.hasAgentRunner.mockReturnValue(true);
 
 			const childSessionId = "child-session-456";
@@ -419,7 +406,7 @@ describe("EdgeWorker - Feedback Delivery", () => {
 				feedbackMessage,
 			);
 
-			// Assert - Should find the child in the correct repository
+			// Assert - Should find the child via sessionRepositories and single ASM
 			expect(result).toBe(true);
 
 			// Wait for the async handlePromptWithStreamingCheck to complete (fire-and-forget pattern)
@@ -427,11 +414,10 @@ describe("EdgeWorker - Feedback Delivery", () => {
 
 			expect(resumeAgentSessionSpy).toHaveBeenCalledOnce();
 
-			// Verify the child was found in one of the repositories
-			const hasAgentRunnerCalls =
-				mockRepo2Manager.hasAgentRunner.mock.calls.length +
-				mockChildAgentSessionManager.hasAgentRunner.mock.calls.length;
-			expect(hasAgentRunnerCalls).toBeGreaterThan(0);
+			// Verify the child was found via the single session manager
+			expect(mockChildAgentSessionManager.hasAgentRunner).toHaveBeenCalledWith(
+				childSessionId,
+			);
 		});
 	});
 
@@ -451,7 +437,7 @@ describe("EdgeWorker - Feedback Delivery", () => {
 
 			// Verify createCyrusToolsServer was called with correct options
 			expect(createCyrusToolsServer).toHaveBeenCalledWith(
-				mockRepository.linearToken,
+				"test-token",
 				expect.objectContaining({
 					parentSessionId,
 					onFeedbackDelivery: expect.any(Function),
@@ -514,6 +500,34 @@ describe("EdgeWorker - Feedback Delivery", () => {
 					process.env.CYRUS_API_KEY = previousApiKey;
 				}
 			}
+		});
+	});
+
+	describe("Child Session Mapping (single source of truth in GlobalSessionRegistry)", () => {
+		it("should register parent-child mapping in GlobalSessionRegistry when handleChildSessionMapping is called", () => {
+			const childId = "new-child-session-789";
+			const parentId = "parent-session-123";
+
+			// Call handleChildSessionMapping
+			(edgeWorker as any).handleChildSessionMapping(childId, parentId);
+
+			// Verify it's in GlobalSessionRegistry (single source of truth - CYPACK-922)
+			const globalRegistry = (edgeWorker as any).globalSessionRegistry;
+			expect(globalRegistry.getParentSessionId(childId)).toBe(parentId);
+		});
+
+		it("should allow AgentSessionManager getParentSessionId callback to find the mapping", () => {
+			const childId = "callback-child-session";
+			const parentId = "callback-parent-session";
+
+			// Simulate what happens when a child session is created via MCP tool
+			(edgeWorker as any).handleChildSessionMapping(childId, parentId);
+
+			// The AgentSessionManager callback reads from globalSessionRegistry
+			const globalRegistry = (edgeWorker as any).globalSessionRegistry;
+			const result = globalRegistry.getParentSessionId(childId);
+
+			expect(result).toBe(parentId);
 		});
 	});
 });

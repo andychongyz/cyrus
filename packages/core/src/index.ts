@@ -35,6 +35,7 @@ export type {
 	CyrusAgentSessionEntry,
 	IssueContext,
 	IssueMinimal,
+	RepositoryContext,
 	Workspace,
 } from "./CyrusAgentSession.js";
 
@@ -43,6 +44,7 @@ export type {
 	EdgeConfig,
 	EdgeConfigPayload,
 	EdgeWorkerConfig,
+	LinearWorkspaceConfig,
 	OAuthCallbackHandler,
 	RepositoryConfig,
 	RepositoryConfigPayload,
@@ -54,9 +56,12 @@ export {
 	EdgeConfigPayloadSchema,
 	// Zod schemas for runtime validation
 	EdgeConfigSchema,
+	LinearWorkspaceConfigSchema,
+	migrateEdgeConfig,
 	RepositoryConfigPayloadSchema,
 	RepositoryConfigSchema,
 	RunnerTypeSchema,
+	requireLinearWorkspaceId,
 	resolvePath,
 	UserAccessControlConfigSchema,
 	UserIdentifierSchema,
@@ -186,6 +191,7 @@ export type {
 	SerializableEdgeWorkerState,
 	SerializedCyrusAgentSession,
 	SerializedCyrusAgentSessionEntry,
+	V3SerializableEdgeWorkerState,
 } from "./PersistenceManager.js";
 export {
 	PERSISTENCE_VERSION,

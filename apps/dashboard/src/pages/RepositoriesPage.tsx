@@ -3,6 +3,24 @@ import { Pencil, Plus, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { getConfig, saveConfig } from "@/api/config";
 
+async function fetchBranchingRules(repoId: string): Promise<string> {
+	const res = await fetch(`/api/repositories/${repoId}/branching-rules`);
+	if (!res.ok) return "";
+	const data = await res.json();
+	return data.content ?? "";
+}
+
+async function saveBranchingRules(
+	repoId: string,
+	content: string,
+): Promise<void> {
+	await fetch(`/api/repositories/${repoId}/branching-rules`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ content }),
+	});
+}
+
 function TagInput({
 	value = [],
 	onChange,
@@ -46,100 +64,6 @@ function TagInput({
 	);
 }
 
-type LabelBranchEntry = { label: string; base: string; prefix: string };
-
-function LabelBranchEditor({
-	value = {},
-	onChange,
-}: {
-	value?: Record<string, { base?: string; prefix?: string }>;
-	onChange: (v: Record<string, { base?: string; prefix?: string }>) => void;
-}) {
-	// Local state so empty/new rows are preserved while the user types
-	const [entries, setEntries] = useState<LabelBranchEntry[]>(() =>
-		Object.entries(value).map(([label, cfg]) => ({
-			label,
-			base: cfg.base ?? "",
-			prefix: cfg.prefix ?? "",
-		})),
-	);
-
-	const syncToParent = (list: LabelBranchEntry[]) => {
-		const obj: Record<string, { base?: string; prefix?: string }> = {};
-		for (const e of list)
-			if (e.label)
-				obj[e.label] = {
-					base: e.base || undefined,
-					prefix: e.prefix || undefined,
-				};
-		onChange(obj);
-	};
-
-	const updateAt = (i: number, patch: Partial<LabelBranchEntry>) => {
-		const next = entries.map((e, j) => (j === i ? { ...e, ...patch } : e));
-		setEntries(next);
-		syncToParent(next);
-	};
-
-	const removeAt = (i: number) => {
-		const next = entries.filter((_, j) => j !== i);
-		setEntries(next);
-		syncToParent(next);
-	};
-
-	return (
-		<div className="space-y-2">
-			{entries.length > 0 && (
-				<div className="grid grid-cols-[1fr_1fr_1fr_auto] gap-2 px-1 text-xs text-muted-foreground">
-					<span>Label</span>
-					<span>Base branch</span>
-					<span>Prefix</span>
-					<span />
-				</div>
-			)}
-			{entries.map((entry, i) => (
-				<div
-					key={i}
-					className="grid grid-cols-[1fr_1fr_1fr_auto] gap-2 items-center"
-				>
-					<input
-						value={entry.label}
-						onChange={(e) => updateAt(i, { label: e.target.value })}
-						placeholder="e.g. hotfix"
-						className="border rounded px-2 py-1.5 text-xs bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-					/>
-					<input
-						value={entry.base}
-						onChange={(e) => updateAt(i, { base: e.target.value })}
-						placeholder="e.g. main"
-						className="border rounded px-2 py-1.5 text-xs bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-					/>
-					<input
-						value={entry.prefix}
-						onChange={(e) => updateAt(i, { prefix: e.target.value })}
-						placeholder="e.g. hotfix/"
-						className="border rounded px-2 py-1.5 text-xs bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-					/>
-					<button
-						onClick={() => removeAt(i)}
-						className="p-1 text-muted-foreground hover:text-destructive transition-colors"
-					>
-						<X size={12} />
-					</button>
-				</div>
-			))}
-			<button
-				onClick={() =>
-					setEntries((prev) => [...prev, { label: "", base: "", prefix: "" }])
-				}
-				className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 mt-1 transition-colors"
-			>
-				<Plus size={12} /> Add rule
-			</button>
-		</div>
-	);
-}
-
 type Repo = Record<string, unknown>;
 
 function RepoModal({
@@ -157,6 +81,21 @@ function RepoModal({
 	);
 	const set = (key: string, value: unknown) =>
 		setForm((f) => ({ ...f, [key]: value }));
+
+	const repoId = form.id as string;
+	const [branchingRules, setBranchingRules] = useState<string>("");
+	const [rulesLoaded, setRulesLoaded] = useState(false);
+
+	useEffect(() => {
+		if (!isNew && repoId) {
+			fetchBranchingRules(repoId).then((content) => {
+				setBranchingRules(content);
+				setRulesLoaded(true);
+			});
+		} else {
+			setRulesLoaded(true);
+		}
+	}, [isNew, repoId]);
 
 	useEffect(() => {
 		const handler = (e: KeyboardEvent) => {
@@ -329,24 +268,22 @@ function RepoModal({
 
 					<hr className="border-border" />
 
-					{/* Label Branch Config */}
+					{/* Branching Rules */}
 					<section>
 						<h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1">
-							Label Branch Config
+							Branching Rules
 						</h3>
 						<p className="text-xs text-muted-foreground mb-3">
-							Map Linear labels to a base branch and/or branch name prefix.
+							Describe how branches should be named. Cyrus uses these rules to
+							decide the base branch and prefix for each issue.
 						</p>
-						<LabelBranchEditor
-							value={
-								form.labelBranchConfig as Record<
-									string,
-									{ base?: string; prefix?: string }
-								>
-							}
-							onChange={(v) =>
-								set("labelBranchConfig", Object.keys(v).length ? v : undefined)
-							}
+						<textarea
+							value={rulesLoaded ? branchingRules : "Loading…"}
+							onChange={(e) => setBranchingRules(e.target.value)}
+							disabled={!rulesLoaded}
+							rows={8}
+							className="w-full border rounded-md px-3 py-2 text-xs font-mono bg-background focus:outline-none focus:ring-2 focus:ring-ring resize-y"
+							placeholder="e.g. - hotfix label or mentions of 'urgent' → base: main, prefix: hotfix/&#10;- default → base: main, prefix: feature/"
 						/>
 					</section>
 
@@ -402,7 +339,10 @@ function RepoModal({
 						Cancel
 					</button>
 					<button
-						onClick={() => onSave(form)}
+						onClick={async () => {
+							await saveBranchingRules(repoId, branchingRules);
+							onSave(form);
+						}}
 						className="px-4 py-1.5 bg-primary text-primary-foreground rounded-md text-sm hover:bg-primary/90 transition-colors"
 					>
 						Save

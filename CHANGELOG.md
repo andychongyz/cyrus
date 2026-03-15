@@ -5,7 +5,10 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- **Label-based branch configuration** - New `labelBranchConfig` option in repository config lets you control which base branch and branch name prefix Cyrus uses based on Linear issue labels. For example, issues labelled `hotfix` can automatically branch off `master` with a `hotfix/` prefix, while `feature` issues branch off `develop` with a `feature/` prefix.
+- **LLM-based branching rules** - Cyrus now determines the base branch and branch name prefix for each issue by reading a plain-English `BRANCHING_RULES.md` file. The file is auto-created at `~/.cyrus/branching_rules/<repo-id>/BRANCHING_RULES.md` when a repository is added, and can be edited directly in the dashboard. This replaces the previous label-based JSON config and supports matching on issue title, description, and labels.
+
+### Removed
+- **`labelBranchConfig`** - Removed from repository config. Replaced by LLM-based `BRANCHING_RULES.md`. Existing `labelBranchConfig` entries in `~/.cyrus/config.json` will be ignored.
 
 ### Fixed
 - **Issue updates no longer trigger duplicate runs** - When a Linear issue title or description was updated, all idle sessions for that issue were resumed, causing multiple concurrent runs. Issue updates are now only delivered to currently running sessions via streaming input; idle sessions are no longer resumed. Duplicate webhooks are also deduplicated. ([CYPACK-954](https://linear.app/ceedar/issue/CYPACK-954), [#977](https://github.com/ceedaragents/cyrus/pull/977))

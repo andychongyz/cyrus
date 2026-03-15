@@ -400,24 +400,6 @@
 						},
 						"additionalProperties": false
 					},
-					"labelBranchConfig": {
-						"type": "object",
-						"propertyNames": {
-							"type": "string"
-						},
-						"additionalProperties": {
-							"type": "object",
-							"properties": {
-								"base": {
-									"type": "string"
-								},
-								"prefix": {
-									"type": "string"
-								}
-							},
-							"additionalProperties": false
-						}
-					},
 					"userAccessControl": {
 						"type": "object",
 						"properties": {

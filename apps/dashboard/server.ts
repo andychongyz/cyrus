@@ -26,6 +26,28 @@ const CYRUS_HOME = path.join(process.env.HOME ?? "~", ".cyrus");
 const CONFIG_PATH = path.join(CYRUS_HOME, "config.json");
 const ENV_PATH = path.join(CYRUS_HOME, ".env");
 const DASHBOARD_CONFIG_PATH = path.join(CYRUS_HOME, "dashboard.json");
+const BRANCHING_RULES_DIR = path.join(CYRUS_HOME, "branching_rules");
+
+const DEFAULT_BRANCHING_RULES = `# Branching Rules
+
+Use these rules to determine the base branch and branch name prefix for each issue.
+
+- If the issue has a "hotfix" label, or the title/description mentions words like
+  "urgent", "critical", "production issue", or "outage" → base: main, prefix: hotfix/
+- Default for everything else → base: main, prefix: feature/
+`;
+
+function branchingRulesPath(repoId: string): string {
+	return path.join(BRANCHING_RULES_DIR, repoId, "BRANCHING_RULES.md");
+}
+
+function ensureBranchingRulesFile(repoId: string): void {
+	const filePath = branchingRulesPath(repoId);
+	if (!fs.existsSync(filePath)) {
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, DEFAULT_BRANCHING_RULES, "utf-8");
+	}
+}
 
 // ─── Dashboard connection config ──────────────────────────────────────────────
 
@@ -66,6 +88,11 @@ app.post("/api/config", (req, res) => {
 	try {
 		fs.mkdirSync(CYRUS_HOME, { recursive: true });
 		fs.writeFileSync(CONFIG_PATH, JSON.stringify(req.body, null, 2));
+		// Ensure BRANCHING_RULES.md exists for each repository
+		const repos: Array<{ id: string }> = req.body.repositories ?? [];
+		for (const repo of repos) {
+			if (repo.id) ensureBranchingRulesFile(repo.id);
+		}
 		return res.json({ success: true });
 	} catch (err) {
 		return res.status(500).json({ error: String(err) });
@@ -88,6 +115,8 @@ app.put("/api/repositories/:id", (req, res) => {
 			repos[idx] = req.body;
 		} else {
 			repos.push(req.body);
+			// Auto-create BRANCHING_RULES.md for new repositories
+			ensureBranchingRulesFile(req.params.id);
 		}
 		config.repositories = repos;
 		fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
@@ -105,6 +134,32 @@ app.delete("/api/repositories/:id", (req, res) => {
 			(r: unknown) => (r as { id: string }).id !== req.params.id,
 		);
 		fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+		return res.json({ success: true });
+	} catch (err) {
+		return res.status(500).json({ error: String(err) });
+	}
+});
+
+// ─── Branching rules endpoints ────────────────────────────────────────────────
+
+app.get("/api/repositories/:id/branching-rules", (req, res) => {
+	try {
+		const filePath = branchingRulesPath(req.params.id);
+		if (!fs.existsSync(filePath)) {
+			ensureBranchingRulesFile(req.params.id);
+		}
+		const content = fs.readFileSync(filePath, "utf-8");
+		return res.json({ content });
+	} catch (err) {
+		return res.status(500).json({ error: String(err) });
+	}
+});
+
+app.put("/api/repositories/:id/branching-rules", (req, res) => {
+	try {
+		const filePath = branchingRulesPath(req.params.id);
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, req.body.content ?? "", "utf-8");
 		return res.json({ success: true });
 	} catch (err) {
 		return res.status(500).json({ error: String(err) });

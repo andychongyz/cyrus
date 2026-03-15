@@ -4,6 +4,11 @@ This changelog documents internal development changes, refactors, tooling update
 
 ## [Unreleased]
 
+### Changed
+- Replaced `labelBranchConfig` (JSON label→branch mapping) with `BranchRulesResolver` — a new class in `packages/edge-worker/src/BranchRulesResolver.ts` that reads `~/.cyrus/branching_rules/<repoId>/BRANCHING_RULES.md` and makes a single-turn Haiku API call (`fetch` to Anthropic `/v1/messages`) to resolve `{ base, prefix }` from issue content + labels. Falls back gracefully to `baseBranch`/no prefix on missing file or error.
+- Removed `labelBranchConfig` from `RepositoryConfigSchema` (Zod + JSON schemas).
+- Dashboard: replaced `LabelBranchEditor` component with a textarea for editing `BRANCHING_RULES.md` directly. New `GET/PUT /api/repositories/:id/branching-rules` endpoints in `server.ts`. File is auto-created with default content when a repo is added.
+
 ### Fixed
 - Reworked `handleIssueContentUpdate()` in `EdgeWorker.ts` to be streaming-only: issue update events are now ONLY delivered to currently running sessions via `addStreamMessage()`. Idle sessions are no longer resumed. If the runner doesn't support streaming input, the event is silently ignored. Added webhook deduplication using `createdAt:issueId` composite key with bounded `processedIssueUpdateKeys` set (auto-prunes at 500 entries). Added DEBUG-level logging that traces the webhook key and changed fields for each delivery. Replaced 5 tests with 7 tests in `EdgeWorker.issue-update-multiple-sessions.test.ts`. ([CYPACK-954](https://linear.app/ceedar/issue/CYPACK-954), [#977](https://github.com/ceedaragents/cyrus/pull/977))
 

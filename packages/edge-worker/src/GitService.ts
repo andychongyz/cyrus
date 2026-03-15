@@ -5,6 +5,7 @@ import { basename, join, resolve as pathResolve } from "node:path";
 
 import type { Issue, RepositoryConfig, Workspace } from "cyrus-core";
 import { createLogger, type ILogger } from "cyrus-core";
+import { BranchRulesResolver } from "./BranchRulesResolver.js";
 import { WorktreeIncludeService } from "./WorktreeIncludeService.js";
 
 /**
@@ -13,10 +14,12 @@ import { WorktreeIncludeService } from "./WorktreeIncludeService.js";
 export class GitService {
 	private logger: ILogger;
 	private worktreeIncludeService: WorktreeIncludeService;
+	private branchRulesResolver: BranchRulesResolver;
 
 	constructor(logger?: ILogger) {
 		this.logger = logger ?? createLogger({ component: "GitService" });
 		this.worktreeIncludeService = new WorktreeIncludeService(this.logger);
+		this.branchRulesResolver = new BranchRulesResolver(this.logger);
 	}
 	/**
 	 * Check if a branch exists locally or remotely
@@ -243,26 +246,29 @@ export class GitService {
 				throw new Error("Not a git repository");
 			}
 
-			// Resolve label-based branch config (prefix + base) if configured
+			// Resolve branch config via LLM + BRANCHING_RULES.md
 			let labelBranchRule: { base?: string; prefix?: string } | undefined;
-			if (repository.labelBranchConfig) {
-				try {
-					const labels = await issue.labels();
-					const issueLabels = labels.nodes.map((l) => l.name.toLowerCase());
-					for (const label of issueLabels) {
-						if (repository.labelBranchConfig[label]) {
-							labelBranchRule = repository.labelBranchConfig[label];
-							this.logger.info(
-								`Label "${label}" matched labelBranchConfig for issue ${issue.identifier}`,
-							);
-							break;
-						}
-					}
-				} catch (_e) {
-					this.logger.warn(
-						`Could not fetch labels for issue ${issue.identifier}, skipping labelBranchConfig`,
+			try {
+				const labels = await issue.labels();
+				const issueLabels = labels.nodes.map((l) => l.name);
+				this.logger.info(
+					`Resolving branch rules for issue ${issue.identifier} via BRANCHING_RULES.md`,
+				);
+				labelBranchRule = await this.branchRulesResolver.resolve({
+					repoId: repository.id,
+					issueTitle: issue.title ?? issue.identifier,
+					issueDescription: issue.description,
+					issueLabels,
+				});
+				if (labelBranchRule) {
+					this.logger.info(
+						`Branch rules resolved: base=${labelBranchRule.base ?? "(default)"}, prefix=${labelBranchRule.prefix ?? "(none)"}`,
 					);
 				}
+			} catch (_e) {
+				this.logger.warn(
+					`Could not resolve branch rules for issue ${issue.identifier}, using defaults`,
+				);
 			}
 
 			// Use Linear's preferred branch name, or generate one if not available
@@ -331,7 +337,7 @@ export class GitService {
 			}
 
 			// Determine base branch for this issue
-			// labelBranchRule.base takes priority over repository.baseBranch
+			// branchRule.base (from BRANCHING_RULES.md) takes priority over repository.baseBranch
 			let baseBranch = labelBranchRule?.base ?? repository.baseBranch;
 
 			// Check if issue has a parent

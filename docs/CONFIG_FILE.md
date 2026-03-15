@@ -142,36 +142,36 @@ Note: Linear MCP tools (`mcp__linear`) are always included automatically. Slack 
 
 ---
 
-## Label-Based Branch Configuration
+## Branching Rules
 
-### `labelBranchConfig` (object)
+Cyrus uses an LLM to decide the base branch and branch name prefix for each issue, based on a plain-English rules file you control.
 
-Controls which base branch Cyrus branches from and what prefix to use in the branch name, based on the Linear issue's labels. The first matching label wins.
+### `BRANCHING_RULES.md`
 
-Both `base` and `prefix` are optional — you can set one without the other.
+When a repository is added, Cyrus automatically creates:
 
-**Example:**
-
-```json
-{
-  "repositories": [{
-    "baseBranch": "develop",
-    "labelBranchConfig": {
-      "hotfix": { "base": "master", "prefix": "hotfix/" },
-      "urgent": { "base": "master", "prefix": "hotfix/" },
-      "feature": { "base": "develop", "prefix": "feature/" },
-      "bug":     { "base": "develop", "prefix": "feature/" }
-    }
-  }]
-}
+```
+~/.cyrus/branching_rules/<repo-id>/BRANCHING_RULES.md
 ```
 
-With this config:
-- An issue labelled **hotfix** creates a branch like `hotfix/ENG-123-fix-crash` off `master`
-- An issue labelled **feature** creates a branch like `feature/ENG-456-add-dashboard` off `develop`
-- An issue with no matching label falls back to `baseBranch` with no prefix
+You can edit this file directly or via the dashboard. The LLM reads the file content together with the issue title, description, and labels, and returns `{ base, prefix }`.
 
-**Priority:** `labelBranchConfig` takes precedence over `baseBranch`, but parent-issue branch inheritance still takes highest priority (see how Cyrus handles sub-issues).
+**Example `BRANCHING_RULES.md`:**
+
+```markdown
+# Branching Rules
+
+- If the issue has a "hotfix" label, or the title/description mentions words like
+  "urgent", "critical", "production issue", or "outage" → base: main, prefix: hotfix/
+- Default for everything else → base: main, prefix: feature/
+```
+
+With these rules:
+- An issue titled "Fix prod outage" creates a branch like `hotfix/ENG-123-fix-prod-outage` off `main`
+- An issue titled "Add dashboard" creates a branch like `feature/ENG-456-add-dashboard` off `main`
+- If the file is missing or the LLM call fails, Cyrus falls back to `baseBranch` with no prefix
+
+**Priority:** Branching rules take precedence over `baseBranch`, but parent-issue branch inheritance still takes highest priority (see how Cyrus handles sub-issues).
 
 ---
 
@@ -319,11 +319,6 @@ When determining allowed tools, Cyrus follows this priority order:
         "labels": ["RFC", "Design"]
       }
     },
-    "labelBranchConfig": {
-      "hotfix": { "base": "master", "prefix": "hotfix/" },
-      "feature": { "base": "develop", "prefix": "feature/" },
-      "bug": { "base": "develop", "prefix": "feature/" }
-    }
   }]
 }
 ```

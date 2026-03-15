@@ -247,22 +247,22 @@ export class GitService {
 			}
 
 			// Resolve branch config via LLM + BRANCHING_RULES.md
-			let labelBranchRule: { base?: string; prefix?: string } | undefined;
+			let branchRule: { base?: string; prefix?: string } | undefined;
 			try {
 				const labels = await issue.labels();
 				const issueLabels = labels.nodes.map((l) => l.name);
 				this.logger.info(
 					`Resolving branch rules for issue ${issue.identifier} via BRANCHING_RULES.md`,
 				);
-				labelBranchRule = await this.branchRulesResolver.resolve({
+				branchRule = await this.branchRulesResolver.resolve({
 					repoId: repository.id,
 					issueTitle: issue.title ?? issue.identifier,
 					issueDescription: issue.description,
 					issueLabels,
 				});
-				if (labelBranchRule) {
+				if (branchRule) {
 					this.logger.info(
-						`Branch rules resolved: base=${labelBranchRule.base ?? "(default)"}, prefix=${labelBranchRule.prefix ?? "(none)"}`,
+						`Branch rules resolved: base=${branchRule.base ?? "(default)"}, prefix=${branchRule.prefix ?? "(none)"}`,
 					);
 				}
 			} catch (_e) {
@@ -279,8 +279,8 @@ export class GitService {
 					.replace(/\s+/g, "-")
 					.substring(0, 30)}`;
 			const sanitized = this.sanitizeBranchName(rawBranchName);
-			const branchName = labelBranchRule?.prefix
-				? `${labelBranchRule.prefix}${sanitized}`
+			const branchName = branchRule?.prefix
+				? `${branchRule.prefix}${sanitized}`
 				: sanitized;
 			const workspacePath = join(repository.workspaceBaseDir, issue.identifier);
 
@@ -338,7 +338,7 @@ export class GitService {
 
 			// Determine base branch for this issue
 			// branchRule.base (from BRANCHING_RULES.md) takes priority over repository.baseBranch
-			let baseBranch = labelBranchRule?.base ?? repository.baseBranch;
+			let baseBranch = branchRule?.base ?? repository.baseBranch;
 
 			// Check if issue has a parent
 			try {

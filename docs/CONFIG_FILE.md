@@ -318,7 +318,7 @@ When determining allowed tools, Cyrus follows this priority order:
       "scoper": {
         "labels": ["RFC", "Design"]
       }
-    },
+    }
   }]
 }
 ```

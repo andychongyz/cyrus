@@ -14,11 +14,14 @@ async function saveBranchingRules(
 	repoId: string,
 	content: string,
 ): Promise<void> {
-	await fetch(`/api/repositories/${repoId}/branching-rules`, {
+	const res = await fetch(`/api/repositories/${repoId}/branching-rules`, {
 		method: "PUT",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({ content }),
 	});
+	if (!res.ok) {
+		throw new Error(`Failed to save branching rules: ${res.status}`);
+	}
 }
 
 function TagInput({
@@ -88,10 +91,14 @@ function RepoModal({
 
 	useEffect(() => {
 		if (!isNew && repoId) {
-			fetchBranchingRules(repoId).then((content) => {
-				setBranchingRules(content);
-				setRulesLoaded(true);
-			});
+			fetchBranchingRules(repoId)
+				.then((content) => {
+					setBranchingRules(content);
+					setRulesLoaded(true);
+				})
+				.catch(() => {
+					setRulesLoaded(true);
+				});
 		} else {
 			setRulesLoaded(true);
 		}
@@ -340,8 +347,15 @@ function RepoModal({
 					</button>
 					<button
 						onClick={async () => {
-							await saveBranchingRules(repoId, branchingRules);
+							// Save repo config first (triggers auto-create of default rules file)
 							onSave(form);
+							// Then save rules content, but only if the user actually typed something
+							// (for new repos the server auto-creates the default; don't overwrite with empty)
+							if (!isNew || branchingRules) {
+								await saveBranchingRules(repoId, branchingRules).catch(
+									() => {},
+								);
+							}
 						}}
 						className="px-4 py-1.5 bg-primary text-primary-foreground rounded-md text-sm hover:bg-primary/90 transition-colors"
 					>

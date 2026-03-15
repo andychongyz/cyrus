@@ -15,15 +15,17 @@ export interface BranchRule {
  * ~/.cyrus/branching_rules/{repoId}/BRANCHING_RULES.md and asking an LLM.
  *
  * Falls back gracefully (returns undefined) on any error or missing file.
+ * Results are cached per repoId+issueTitle to avoid redundant API calls.
  */
 export class BranchRulesResolver {
 	private logger: ILogger;
+	private cache = new Map<string, BranchRule | undefined>();
 
 	constructor(logger?: ILogger) {
 		this.logger = logger ?? createLogger({ component: "BranchRulesResolver" });
 	}
 
-	rulesPath(repoId: string): string {
+	private rulesPath(repoId: string): string {
 		return join(
 			homedir(),
 			".cyrus",
@@ -39,6 +41,11 @@ export class BranchRulesResolver {
 		issueDescription?: string | null;
 		issueLabels: string[];
 	}): Promise<BranchRule | undefined> {
+		const cacheKey = `${opts.repoId}:${opts.issueTitle}`;
+		if (this.cache.has(cacheKey)) {
+			return this.cache.get(cacheKey);
+		}
+
 		const filePath = this.rulesPath(opts.repoId);
 
 		if (!existsSync(filePath)) {
@@ -98,14 +105,28 @@ export class BranchRulesResolver {
 			const data = (await response.json()) as {
 				content: Array<{ type: string; text: string }>;
 			};
-			const text = data.content?.find((b) => b.type === "text")?.text?.trim();
+			let text = data.content?.find((b) => b.type === "text")?.text?.trim();
 			if (!text) return undefined;
 
-			const parsed = JSON.parse(text) as { base?: string; prefix?: string };
-			return {
-				base: parsed.base || undefined,
-				prefix: parsed.prefix || undefined,
+			// Strip markdown code fences that LLMs sometimes include despite instructions
+			text = text
+				.replace(/^```(?:json)?\s*\n?/i, "")
+				.replace(/\n?```\s*$/i, "")
+				.trim();
+
+			const parsed = JSON.parse(text);
+			const result: BranchRule = {
+				base:
+					typeof parsed.base === "string"
+						? parsed.base || undefined
+						: undefined,
+				prefix:
+					typeof parsed.prefix === "string"
+						? parsed.prefix || undefined
+						: undefined,
 			};
+			this.cache.set(cacheKey, result);
+			return result;
 		} catch (err) {
 			this.logger.warn(`LLM branch resolution failed: ${err}`);
 			return undefined;

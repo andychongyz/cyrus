@@ -38,7 +38,16 @@ Use these rules to determine the base branch and branch name prefix for each iss
 `;
 
 function branchingRulesPath(repoId: string): string {
-	return path.join(BRANCHING_RULES_DIR, repoId, "BRANCHING_RULES.md");
+	if (!repoId || /[/\\]|\.\./.test(repoId)) {
+		throw new Error(`Invalid repository ID: ${repoId}`);
+	}
+	const resolved = path.resolve(
+		path.join(BRANCHING_RULES_DIR, repoId, "BRANCHING_RULES.md"),
+	);
+	if (!resolved.startsWith(path.resolve(BRANCHING_RULES_DIR) + path.sep)) {
+		throw new Error(`Path traversal detected for repoId: ${repoId}`);
+	}
+	return resolved;
 }
 
 function ensureBranchingRulesFile(repoId: string): void {
@@ -157,9 +166,21 @@ app.get("/api/repositories/:id/branching-rules", (req, res) => {
 
 app.put("/api/repositories/:id/branching-rules", (req, res) => {
 	try {
+		const content = req.body.content;
+		if (
+			content !== undefined &&
+			content !== null &&
+			typeof content !== "string"
+		) {
+			return res.status(400).json({ error: "content must be a string" });
+		}
 		const filePath = branchingRulesPath(req.params.id);
 		fs.mkdirSync(path.dirname(filePath), { recursive: true });
-		fs.writeFileSync(filePath, req.body.content ?? "", "utf-8");
+		fs.writeFileSync(
+			filePath,
+			typeof content === "string" ? content : "",
+			"utf-8",
+		);
 		return res.json({ success: true });
 	} catch (err) {
 		return res.status(500).json({ error: String(err) });

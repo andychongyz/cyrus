@@ -438,12 +438,14 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 					env: Object.fromEntries(
 						Object.entries({
 							...process.env,
-							// If CLAUDE_CODE_OAUTH_TOKEN is set, exclude ANTHROPIC_API_KEY so the
-							// SDK uses OAuth (the API key is only needed for direct API calls like
-							// BranchRulesResolver and ProcedureAnalyzer, not for Claude sessions).
-							...(process.env.CLAUDE_CODE_OAUTH_TOKEN && {
-								ANTHROPIC_API_KEY: undefined,
-							}),
+							// Always exclude ANTHROPIC_API_KEY from Claude runner sessions.
+							// The API key is only needed for direct API calls (BranchRulesResolver,
+							// ProcedureAnalyzer), not for Claude Code sessions which use OAuth.
+							ANTHROPIC_API_KEY: undefined,
+							// Unset CLAUDECODE so the spawned Claude process does not reject startup.
+							// If cyrus-agent was started inside a Claude Code session it inherits
+							// CLAUDECODE=1, which causes nested-session detection to fire and exit 1.
+							CLAUDECODE: undefined,
 							CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1",
 							CLAUDE_CODE_ENABLE_TASKS: "true",
 							CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1",

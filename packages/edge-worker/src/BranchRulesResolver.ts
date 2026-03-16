@@ -63,17 +63,12 @@ export class BranchRulesResolver {
 		}
 
 		const apiKey = process.env.ANTHROPIC_API_KEY;
-		const oauthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
-		if (!apiKey && !oauthToken) {
+		if (!apiKey) {
 			this.logger.warn(
-				"Neither ANTHROPIC_API_KEY nor CLAUDE_CODE_OAUTH_TOKEN is set, skipping LLM branch resolution",
+				"ANTHROPIC_API_KEY not set, skipping LLM branch resolution",
 			);
 			return undefined;
 		}
-
-		const authHeaders: Record<string, string> = apiKey
-			? { "x-api-key": apiKey }
-			: { Authorization: `Bearer ${oauthToken}` };
 
 		const prompt = [
 			`Title: ${opts.issueTitle}`,
@@ -88,7 +83,7 @@ export class BranchRulesResolver {
 			const response = await fetch("https://api.anthropic.com/v1/messages", {
 				method: "POST",
 				headers: {
-					...authHeaders,
+					"x-api-key": apiKey,
 					"anthropic-version": "2023-06-01",
 					"content-type": "application/json",
 				},

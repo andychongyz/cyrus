@@ -435,18 +435,20 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 					// particularly with CLAUDE.md files, settings files, and custom slash commands,
 					// see: https://docs.claude.com/en/docs/claude-code/sdk/migration-guide#settings-sources-no-longer-loaded-by-default
 					settingSources: ["user", "project", "local"],
-					env: {
-						...process.env,
-						// If CLAUDE_CODE_OAUTH_TOKEN is set, exclude ANTHROPIC_API_KEY so the
-						// SDK uses OAuth (the API key is only needed for direct API calls like
-						// BranchRulesResolver and ProcedureAnalyzer, not for Claude sessions).
-						...(process.env.CLAUDE_CODE_OAUTH_TOKEN && {
-							ANTHROPIC_API_KEY: undefined,
-						}),
-						CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1",
-						CLAUDE_CODE_ENABLE_TASKS: "true",
-						CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1",
-					},
+					env: Object.fromEntries(
+						Object.entries({
+							...process.env,
+							// If CLAUDE_CODE_OAUTH_TOKEN is set, exclude ANTHROPIC_API_KEY so the
+							// SDK uses OAuth (the API key is only needed for direct API calls like
+							// BranchRulesResolver and ProcedureAnalyzer, not for Claude sessions).
+							...(process.env.CLAUDE_CODE_OAUTH_TOKEN && {
+								ANTHROPIC_API_KEY: undefined,
+							}),
+							CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1",
+							CLAUDE_CODE_ENABLE_TASKS: "true",
+							CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1",
+						}).filter(([, v]) => v !== undefined),
+					) as NodeJS.ProcessEnv,
 					...(this.config.workingDirectory && {
 						cwd: this.config.workingDirectory,
 					}),

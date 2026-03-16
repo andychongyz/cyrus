@@ -64,8 +64,11 @@ export class BranchRulesResolver {
 
 		const apiKey = process.env.ANTHROPIC_API_KEY;
 		if (!apiKey) {
+			const hasOauth = Boolean(process.env.CLAUDE_CODE_OAUTH_TOKEN);
 			this.logger.warn(
-				"ANTHROPIC_API_KEY not set, skipping LLM branch resolution",
+				hasOauth
+					? "ANTHROPIC_API_KEY not set, skipping LLM branch resolution (CLAUDE_CODE_OAUTH_TOKEN cannot be used for direct API calls — set ANTHROPIC_API_KEY to enable this feature)"
+					: "ANTHROPIC_API_KEY not set, skipping LLM branch resolution",
 			);
 			return undefined;
 		}

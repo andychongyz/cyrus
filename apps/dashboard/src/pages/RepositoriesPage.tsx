@@ -347,15 +347,18 @@ function RepoModal({
 					</button>
 					<button
 						onClick={async () => {
-							// Save repo config first (triggers auto-create of default rules file)
-							onSave(form);
-							// Then save rules content, but only if the user actually typed something
-							// (for new repos the server auto-creates the default; don't overwrite with empty)
-							if (!isNew || branchingRules) {
+							// Save branching rules FIRST so the file is on disk before the modal
+							// closes. Running the config save concurrently means onSuccess can fire
+							// and close the modal before the PUT completes — the next Edit open then
+							// fetches stale/empty content. Guard with rulesLoaded so we never
+							// overwrite with "" if the initial fetch hasn't returned yet.
+							if (rulesLoaded && (!isNew || branchingRules)) {
 								await saveBranchingRules(repoId, branchingRules).catch(
 									() => {},
 								);
 							}
+							// Then save repo config (triggers onSuccess → setEditingRepo(null))
+							onSave(form);
 						}}
 						className="px-4 py-1.5 bg-primary text-primary-foreground rounded-md text-sm hover:bg-primary/90 transition-colors"
 					>

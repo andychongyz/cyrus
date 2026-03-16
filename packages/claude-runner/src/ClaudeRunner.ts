@@ -437,6 +437,12 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 					settingSources: ["user", "project", "local"],
 					env: {
 						...process.env,
+						// If CLAUDE_CODE_OAUTH_TOKEN is set, exclude ANTHROPIC_API_KEY so the
+						// SDK uses OAuth (the API key is only needed for direct API calls like
+						// BranchRulesResolver and ProcedureAnalyzer, not for Claude sessions).
+						...(process.env.CLAUDE_CODE_OAUTH_TOKEN && {
+							ANTHROPIC_API_KEY: undefined,
+						}),
 						CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1",
 						CLAUDE_CODE_ENABLE_TASKS: "true",
 						CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1",

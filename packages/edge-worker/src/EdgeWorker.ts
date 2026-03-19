@@ -2988,6 +2988,11 @@ ${taskSection}`;
 			lowercaseLabels.includes(label.toLowerCase()),
 		);
 
+		// ALWAYS check for 'question' label (case-insensitive) regardless of EdgeConfig
+		// This is a hardcoded rule: any issue with 'question'/'Question' label
+		// goes to simple-question procedure (no code changes, no PR)
+		const hasQuestionLabel = lowercaseLabels.includes("question");
+
 		// ALWAYS check for 'orchestrator' label (case-insensitive) regardless of EdgeConfig
 		// This is a hardcoded rule: any issue with 'orchestrator'/'Orchestrator' label
 		// goes to orchestrator procedure
@@ -3024,7 +3029,18 @@ ${taskSection}`;
 		let finalClassification: RequestClassification;
 
 		// If labels indicate a specific procedure, use that instead of AI routing
-		if (hasDebuggerLabel) {
+		if (hasQuestionLabel) {
+			const questionProcedure =
+				this.procedureAnalyzer.getProcedure("simple-question");
+			if (!questionProcedure) {
+				throw new Error("simple-question procedure not found in registry");
+			}
+			finalProcedure = questionProcedure;
+			finalClassification = "question";
+			log.info(
+				`Using simple-question procedure due to question label (skipping AI routing)`,
+			);
+		} else if (hasDebuggerLabel) {
 			const debuggerProcedure =
 				this.procedureAnalyzer.getProcedure("debugger-full");
 			if (!debuggerProcedure) {
@@ -5653,6 +5669,7 @@ ${input.userComment}
 			requireLinearWorkspaceId(repository),
 		);
 		let hasOrchestratorLabel = false;
+		let hasQuestionLabel = false;
 
 		// Get issueId from issueContext (preferred) or deprecated issueId field
 		const issueId = session.issueContext?.issueId ?? session.issueId;
@@ -5680,6 +5697,9 @@ ${input.userComment}
 
 				hasOrchestratorLabel =
 					hasHardcodedOrchestratorLabel || hasConfiguredOrchestratorLabel;
+
+				// ALWAYS check for 'question' label (case-insensitive) regardless of EdgeConfig
+				hasQuestionLabel = lowercaseLabels.includes("question");
 			} catch (error) {
 				this.logger.error(`Failed to fetch issue labels for routing:`, error);
 				// Continue with AI routing if label fetch fails
@@ -5689,8 +5709,20 @@ ${input.userComment}
 		let selectedProcedure: ProcedureDefinition;
 		let finalClassification: RequestClassification;
 
-		// If Orchestrator label is present, ALWAYS use orchestrator-full procedure
-		if (hasOrchestratorLabel) {
+		// If question label is present, ALWAYS use simple-question procedure (no PR)
+		if (hasQuestionLabel) {
+			const questionProcedure =
+				this.procedureAnalyzer.getProcedure("simple-question");
+			if (!questionProcedure) {
+				throw new Error("simple-question procedure not found in registry");
+			}
+			selectedProcedure = questionProcedure;
+			finalClassification = "question";
+			this.logger.info(
+				`Using simple-question procedure due to question label (skipping AI routing)`,
+			);
+		} else if (hasOrchestratorLabel) {
+			// If Orchestrator label is present, ALWAYS use orchestrator-full procedure
 			const orchestratorProcedure =
 				this.procedureAnalyzer.getProcedure("orchestrator-full");
 			if (!orchestratorProcedure) {
@@ -5702,7 +5734,7 @@ ${input.userComment}
 				`Using orchestrator-full procedure due to Orchestrator label (skipping AI routing)`,
 			);
 		} else {
-			// No Orchestrator label - use AI routing based on prompt content
+			// No label override - use AI routing based on prompt content
 			const routingDecision = await this.procedureAnalyzer.determineRoutine(
 				promptBody.trim(),
 			);

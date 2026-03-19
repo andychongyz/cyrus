@@ -110,19 +110,31 @@ program
 program
 	.command("self-add-repo [url] [workspace]")
 	.description(
-		'Clone a repo and add it to config. URL accepts any valid git clone address (e.g., "https://github.com/org/repo.git"). Workspace is the display name of the Linear workspace (e.g., "My Workspace") - not a UUID.',
+		'Clone a repo and add it to config. URL accepts any valid git clone address (e.g., "https://github.com/org/repo.git"). Workspace is the display name of the Linear workspace (e.g., "My Workspace"). If URL is omitted, prompts interactively.',
 	)
-	.action(async (url?: string, workspace?: string) => {
-		const opts = program.opts();
-		const app = new Application(
-			opts.cyrusHome,
-			opts.envFile,
-			packageJson.version,
-		);
-		await new SelfAddRepoCommand(app).execute(
-			[url, workspace].filter(Boolean) as string[],
-		);
-	});
+	.option(
+		"-l, --label <labels>",
+		"Comma-separated routing labels (defaults to repo name)",
+	)
+	.action(
+		async (
+			url: string | undefined,
+			workspace: string | undefined,
+			cmdOpts: { label?: string },
+		) => {
+			const opts = program.opts();
+			const app = new Application(
+				opts.cyrusHome,
+				opts.envFile,
+				packageJson.version,
+			);
+			const args = [url, workspace].filter(Boolean) as string[];
+			if (cmdOpts.label) {
+				args.push("-l", cmdOpts.label);
+			}
+			await new SelfAddRepoCommand(app).execute(args);
+		},
+	);
 
 // Parse and execute
 (async () => {

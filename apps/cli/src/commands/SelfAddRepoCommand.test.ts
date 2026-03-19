@@ -26,9 +26,13 @@ vi.mock("node:fs", () => ({
 	writeFileSync: mocks.mockWriteFileSync,
 }));
 
-vi.mock("node:path", () => ({
-	resolve: vi.fn((...parts) => parts.join("/")),
-}));
+vi.mock("node:path", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:path")>();
+	return {
+		...actual,
+		resolve: vi.fn((...parts: string[]) => parts.join("/")),
+	};
+});
 
 vi.mock("node:readline", () => ({
 	createInterface: vi.fn(() => ({
@@ -104,19 +108,17 @@ describe("SelfAddRepoCommand", () => {
 		it("should prompt for URL when not provided", async () => {
 			mocks.mockReadFileSync.mockReturnValue(
 				JSON.stringify({
-					repositories: [
-						{
-							id: "existing",
-							name: "existing-repo",
-							linearWorkspaceId: "ws-123",
+					linearWorkspaces: {
+						"ws-123": {
 							linearToken: "token",
 							linearRefreshToken: "refresh",
+							linearWorkspaceName: "Test Workspace",
 						},
-					],
+					},
+					repositories: [],
 				}),
 			);
 
-			// Mock readline to provide URL
 			mocks.mockQuestion.mockImplementation(
 				(_question: string, callback: (answer: string) => void) => {
 					callback("https://github.com/user/prompted-repo.git");
@@ -125,27 +127,44 @@ describe("SelfAddRepoCommand", () => {
 
 			await expect(command.execute([])).rejects.toThrow("process.exit called");
 			expect(mockExit).toHaveBeenCalledWith(0);
+
 			expect(mocks.mockQuestion).toHaveBeenCalledWith(
 				"Repository URL: ",
 				expect.any(Function),
 			);
+
+			const writtenConfig = JSON.parse(
+				mocks.mockWriteFileSync.mock.calls[0][1],
+			);
+			const addedRepo = writtenConfig.repositories.find(
+				(r: any) => r.id === "generated-uuid-123",
+			);
+			expect(addedRepo.name).toBe("prompted-repo");
 		});
 
-		it("should error when URL is empty after prompt", async () => {
+		it("should error when prompted URL is empty", async () => {
 			mocks.mockReadFileSync.mockReturnValue(
 				JSON.stringify({
-					repositories: [{ linearWorkspaceId: "ws", linearToken: "tok" }],
+					linearWorkspaces: {
+						"ws-123": {
+							linearToken: "token",
+							linearRefreshToken: "refresh",
+							linearWorkspaceName: "Test Workspace",
+						},
+					},
+					repositories: [],
 				}),
 			);
 
 			mocks.mockQuestion.mockImplementation(
 				(_question: string, callback: (answer: string) => void) => {
-					callback(""); // Empty URL
+					callback("");
 				},
 			);
 
 			await expect(command.execute([])).rejects.toThrow("process.exit called");
 			expect(mockExit).toHaveBeenCalledWith(1);
+			expect(mockApp.logger.error).toHaveBeenCalledWith("URL is required");
 		});
 
 		it("should extract repo name from URL correctly", async () => {
@@ -599,7 +618,51 @@ describe("SelfAddRepoCommand", () => {
 				workspaceBaseDir: "/home/user/.cyrus/worktrees",
 				linearWorkspaceId: "ws-123",
 				isActive: true,
+				routingLabels: ["new-repo"],
 			});
+		});
+
+		it("should use custom routing labels when -l flag is provided", async () => {
+			mocks.mockReadFileSync.mockReturnValue(
+				JSON.stringify({
+					linearWorkspaces: {
+						"ws-123": {
+							linearToken: "existing-token",
+							linearRefreshToken: "existing-refresh",
+							linearWorkspaceName: "Test Workspace",
+						},
+					},
+					repositories: [
+						{
+							id: "existing",
+							linearWorkspaceId: "ws-123",
+						},
+					],
+				}),
+			);
+
+			await expect(
+				command.execute([
+					"https://github.com/user/new-repo.git",
+					"-l",
+					"custom-label,another-label",
+				]),
+			).rejects.toThrow("process.exit called");
+			expect(mockExit).toHaveBeenCalledWith(0);
+
+			expect(mocks.mockWriteFileSync).toHaveBeenCalled();
+			const writtenConfig = JSON.parse(
+				mocks.mockWriteFileSync.mock.calls[0][1],
+			);
+
+			const addedRepo = writtenConfig.repositories.find(
+				(r: any) => r.id === "generated-uuid-123",
+			);
+
+			expect(addedRepo.routingLabels).toEqual([
+				"custom-label",
+				"another-label",
+			]);
 		});
 
 		it("should preserve existing repositories", async () => {

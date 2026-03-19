@@ -10,8 +10,220 @@ All notable changes to this project will be documented in this file.
 ### Removed
 - **`labelBranchConfig`** - Removed from repository config. Replaced by LLM-based `BRANCHING_RULES.md`. Existing `labelBranchConfig` entries in `~/.cyrus/config.json` will be ignored.
 
+## [0.2.37] - 2026-03-18
+
+### Added
+- **Slack sessions now support user-configured MCP tools** - Slack chat sessions can now access MCP tools from user-configured `.mcp.json` files (e.g., Supabase, Stripe, Trigger.dev), not just the built-in Linear/cyrus-tools/Slack MCPs. ([CYPACK-982](https://linear.app/ceedar/issue/CYPACK-982), [#1006](https://github.com/ceedaragents/cyrus/pull/1006))
+
+### Packages
+
+#### cyrus-cloudflare-tunnel-client
+- cyrus-cloudflare-tunnel-client@0.2.37
+
+#### cyrus-mcp-tools
+- cyrus-mcp-tools@0.2.37
+
+#### cyrus-claude-runner
+- cyrus-claude-runner@0.2.37
+
+#### cyrus-core
+- cyrus-core@0.2.37
+
+#### cyrus-simple-agent-runner
+- cyrus-simple-agent-runner@0.2.37
+
+#### cyrus-codex-runner
+- cyrus-codex-runner@0.2.37
+
+#### cyrus-cursor-runner
+- cyrus-cursor-runner@0.2.37
+
+#### cyrus-config-updater
+- cyrus-config-updater@0.2.37
+
+#### cyrus-linear-event-transport
+- cyrus-linear-event-transport@0.2.37
+
+#### cyrus-github-event-transport
+- cyrus-github-event-transport@0.2.37
+
+#### cyrus-slack-event-transport
+- cyrus-slack-event-transport@0.2.37
+
+#### cyrus-gemini-runner
+- cyrus-gemini-runner@0.2.37
+
+#### cyrus-edge-worker
+- cyrus-edge-worker@0.2.37
+
+#### cyrus-ai (CLI)
+- cyrus-ai@0.2.37
+
+## [0.2.36] - 2026-03-17
+
+### Added
+- **Automatic worktree cleanup on issue completion or deletion** - When a Linear issue moves to Done, Cancelled, or is deleted, worktrees are automatically deleted and any active sessions are stopped. Handles both single-repo and multi-repo layouts. ([CYPACK-961](https://linear.app/ceedar/issue/CYPACK-961), [#982](https://github.com/ceedaragents/cyrus/pull/982))
+
 ### Fixed
+- **Worktree recreation after issue reopened** - Fixed a bug where worktrees were not recreated when an issue was re-prompted after being moved to Done/Cancelled. Stale git worktree entries from a previous cleanup could prevent fresh worktree creation. ([CYPACK-961](https://linear.app/ceedar/issue/CYPACK-961), [#982](https://github.com/ceedaragents/cyrus/pull/982))
+- **Self-hosted onboarding improvements** - Fixed `-l` routing labels flag not working with `cyrus self-add-repo`, idle mode now shows `cyrus self-add-repo` guidance instead of cloud URL for self-hosted users, and `cyrus self-auth` error messages now correctly point to `~/.cyrus/.env` instead of `.zshrc`. ([CYPACK-967](https://linear.app/ceedar/issue/CYPACK-967), [#991](https://github.com/ceedaragents/cyrus/pull/991))
+- **Security vulnerabilities resolved** - Fixed all Dependabot security alerts (1 critical, 20 high, 11 moderate, 4 low) by updating transitive dependency versions for packages including simple-git, undici, hono, minimatch, rollup, and others. ([CYPACK-973](https://linear.app/ceedar/issue/CYPACK-973), [#1000](https://github.com/ceedaragents/cyrus/pull/1000))
+
+### Changed
+- **PR descriptions now include interaction tips** - Pull requests created by Cyrus now include a tip explaining how to @ mention the bot (configurable via `GITHUB_BOT_USERNAME`) for inline responses and how to submit "changes requested" reviews for batch feedback. ([CYPACK-974](https://linear.app/ceedar/issue/CYPACK-974), [#1001](https://github.com/ceedaragents/cyrus/pull/1001))
+- **Co-authored-by attribution disabled** - Git commits no longer include the "Co-Authored-By: Claude" trailer. ([CYPACK-974](https://linear.app/ceedar/issue/CYPACK-974), [#1001](https://github.com/ceedaragents/cyrus/pull/1001))
+
+### Packages
+
+#### cyrus-cloudflare-tunnel-client
+- cyrus-cloudflare-tunnel-client@0.2.36
+
+#### cyrus-mcp-tools
+- cyrus-mcp-tools@0.2.36
+
+#### cyrus-claude-runner
+- cyrus-claude-runner@0.2.36
+
+#### cyrus-core
+- cyrus-core@0.2.36
+
+#### cyrus-simple-agent-runner
+- cyrus-simple-agent-runner@0.2.36
+
+#### cyrus-codex-runner
+- cyrus-codex-runner@0.2.36
+
+#### cyrus-cursor-runner
+- cyrus-cursor-runner@0.2.36
+
+#### cyrus-config-updater
+- cyrus-config-updater@0.2.36
+
+#### cyrus-linear-event-transport
+- cyrus-linear-event-transport@0.2.36
+
+#### cyrus-github-event-transport
+- cyrus-github-event-transport@0.2.36
+
+#### cyrus-slack-event-transport
+- cyrus-slack-event-transport@0.2.36
+
+#### cyrus-gemini-runner
+- cyrus-gemini-runner@0.2.36
+
+#### cyrus-edge-worker
+- cyrus-edge-worker@0.2.36
+
+#### cyrus-ai (CLI)
+- cyrus-ai@0.2.36
+
+## [0.2.35] - 2026-03-16
+
+### Fixed
+- **OAuth token refresh no longer stops working after first expiry** - Fixed a bug where the OAuth token refresh mechanism would permanently stop refreshing after the first successful refresh, causing all Linear API calls to fail ~24 hours later. Subsequent token expirations now correctly trigger fresh refreshes. ([CYPACK-963](https://linear.app/ceedar/issue/CYPACK-963), [#986](https://github.com/ceedaragents/cyrus/pull/986))
+- **Self-auth no longer modifies repositories or shows confusing messages** - `cyrus self-auth` now only saves workspace credentials and no longer auto-links repositories. Shows "Saved credentials for workspace: \<name\>" and guides users to run `cyrus self-add-repo` when no repos exist. Resolves [#716](https://github.com/ceedaragents/cyrus/issues/716). ([CYPACK-964](https://linear.app/ceedar/issue/CYPACK-964), [#988](https://github.com/ceedaragents/cyrus/pull/988))
+- **Linear webhook signature verification more reliable** - Webhook signature verification now uses the raw request body bytes instead of re-serializing JSON, preventing intermittent HMAC failures caused by key ordering or whitespace differences.
+
+### Added
+- **Routing labels default when adding repos** - `cyrus self-add-repo` now automatically sets routing labels to the repository name. Use `-l custom,labels` to override with custom comma-separated labels. ([CYPACK-963](https://linear.app/ceedar/issue/CYPACK-963), [#986](https://github.com/ceedaragents/cyrus/pull/986))
+- **Cloudflare tunnel auto-starts during self-auth** - Running `cyrus self-auth` now automatically starts a Cloudflare tunnel, so webhooks can reach the local agent immediately after authentication. ([#952](https://github.com/ceedaragents/cyrus/pull/952))
+
+### Packages
+
+#### cyrus-cloudflare-tunnel-client
+- cyrus-cloudflare-tunnel-client@0.2.35
+
+#### cyrus-mcp-tools
+- cyrus-mcp-tools@0.2.35
+
+#### cyrus-claude-runner
+- cyrus-claude-runner@0.2.35
+
+#### cyrus-core
+- cyrus-core@0.2.35
+
+#### cyrus-simple-agent-runner
+- cyrus-simple-agent-runner@0.2.35
+
+#### cyrus-codex-runner
+- cyrus-codex-runner@0.2.35
+
+#### cyrus-cursor-runner
+- cyrus-cursor-runner@0.2.35
+
+#### cyrus-config-updater
+- cyrus-config-updater@0.2.35
+
+#### cyrus-linear-event-transport
+- cyrus-linear-event-transport@0.2.35
+
+#### cyrus-github-event-transport
+- cyrus-github-event-transport@0.2.35
+
+#### cyrus-slack-event-transport
+- cyrus-slack-event-transport@0.2.35
+
+#### cyrus-gemini-runner
+- cyrus-gemini-runner@0.2.35
+
+#### cyrus-edge-worker
+- cyrus-edge-worker@0.2.35
+
+#### cyrus-ai (CLI)
+- cyrus-ai@0.2.35
+
+## [0.2.34] - 2026-03-13
+
+### Fixed
+- **Slack-created issues no longer land in Triage** - Issues created from Slack conversations now default to "Backlog" status instead of potentially being set to "Triage". ([CYPACK-957](https://linear.app/ceedar/issue/CYPACK-957), [#978](https://github.com/ceedaragents/cyrus/pull/978))
 - **Issue updates no longer trigger duplicate runs** - When a Linear issue title or description was updated, all idle sessions for that issue were resumed, causing multiple concurrent runs. Issue updates are now only delivered to currently running sessions via streaming input; idle sessions are no longer resumed. Duplicate webhooks are also deduplicated. ([CYPACK-954](https://linear.app/ceedar/issue/CYPACK-954), [#977](https://github.com/ceedaragents/cyrus/pull/977))
+
+### Added
+- **Multi-repo routing** - A single Linear issue can now be routed to multiple repositories. Supported syntax: `[repo=frontend]` and `[repo=backend]` as separate tags, `repo=frontend,backend` or `repos=frontend,backend` as comma-separated lists, `repo=frontend#develop` or `[repo=frontend#release/v2]` for base branch overrides, and label-based routing that matches multiple repos when their routing labels overlap. Each matched repository gets its own worktree subfolder and git context within the same session, with per-repository branch names, MCP configs, and tool permissions. ([CYPACK-911](https://linear.app/ceedar/issue/CYPACK-911), [#955](https://github.com/ceedaragents/cyrus/pull/955), [#959](https://github.com/ceedaragents/cyrus/pull/959), [#960](https://github.com/ceedaragents/cyrus/pull/960), [#961](https://github.com/ceedaragents/cyrus/pull/961), [#962](https://github.com/ceedaragents/cyrus/pull/962), [#963](https://github.com/ceedaragents/cyrus/pull/963), [#964](https://github.com/ceedaragents/cyrus/pull/964), [#965](https://github.com/ceedaragents/cyrus/pull/965))
+
+### Packages
+
+#### cyrus-cloudflare-tunnel-client
+- cyrus-cloudflare-tunnel-client@0.2.34
+
+#### cyrus-mcp-tools
+- cyrus-mcp-tools@0.2.34
+
+#### cyrus-claude-runner
+- cyrus-claude-runner@0.2.34
+
+#### cyrus-core
+- cyrus-core@0.2.34
+
+#### cyrus-simple-agent-runner
+- cyrus-simple-agent-runner@0.2.34
+
+#### cyrus-codex-runner
+- cyrus-codex-runner@0.2.34
+
+#### cyrus-cursor-runner
+- cyrus-cursor-runner@0.2.34
+
+#### cyrus-config-updater
+- cyrus-config-updater@0.2.34
+
+#### cyrus-linear-event-transport
+- cyrus-linear-event-transport@0.2.34
+
+#### cyrus-github-event-transport
+- cyrus-github-event-transport@0.2.34
+
+#### cyrus-slack-event-transport
+- cyrus-slack-event-transport@0.2.34
+
+#### cyrus-gemini-runner
+- cyrus-gemini-runner@0.2.34
+
+#### cyrus-edge-worker
+- cyrus-edge-worker@0.2.34
+
+#### cyrus-ai (CLI)
+- cyrus-ai@0.2.34
 
 ## [0.2.33] - 2026-03-10
 

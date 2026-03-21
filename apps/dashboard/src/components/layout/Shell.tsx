@@ -1,10 +1,9 @@
-import { Activity, LogOut, Server, Settings, ShieldCheck } from "lucide-react";
+import { LogOut, Server, Settings, ShieldCheck } from "lucide-react";
 import { NavLink, Outlet } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { useConnectionStore } from "@/store/connectionStore";
 
 const navItems = [
-	{ to: "/sessions", label: "Sessions", icon: Activity },
 	{ to: "/config", label: "Global Config", icon: Settings },
 	{ to: "/repositories", label: "Repositories", icon: Server },
 	{ to: "/access-control", label: "Access Control", icon: ShieldCheck },

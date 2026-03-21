@@ -5,7 +5,6 @@ import { AccessControlPage } from "@/pages/AccessControlPage";
 import { ConnectPage } from "@/pages/ConnectPage";
 import { GlobalConfigPage } from "@/pages/GlobalConfigPage";
 import { RepositoriesPage } from "@/pages/RepositoriesPage";
-import { SessionsPage } from "@/pages/SessionsPage";
 import { useConnectionStore } from "@/store/connectionStore";
 
 const queryClient = new QueryClient({
@@ -20,12 +19,11 @@ function AppRoutes() {
 	return (
 		<Routes>
 			<Route element={<Shell />}>
-				<Route index element={<Navigate to="/sessions" replace />} />
-				<Route path="/sessions" element={<SessionsPage />} />
+				<Route index element={<Navigate to="/config" replace />} />
 				<Route path="/config" element={<GlobalConfigPage />} />
 				<Route path="/repositories" element={<RepositoriesPage />} />
 				<Route path="/access-control" element={<AccessControlPage />} />
-				<Route path="*" element={<Navigate to="/sessions" replace />} />
+				<Route path="*" element={<Navigate to="/config" replace />} />
 			</Route>
 		</Routes>
 	);

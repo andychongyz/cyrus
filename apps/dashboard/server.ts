@@ -5,7 +5,6 @@
  */
 
 import fs from "node:fs";
-import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
@@ -198,6 +197,8 @@ const SECRET_KEYS = new Set([
 	"CYRUS_API_KEY",
 	"CLOUDFLARE_TOKEN",
 	"NGROK_AUTH_TOKEN",
+	"SLACK_BOT_TOKEN",
+	"SLACK_SIGNING_SECRET",
 ]);
 
 function parseEnvFile(content: string): Record<string, string> {
@@ -276,65 +277,6 @@ app.post("/api/dashboard-config", (req, res) => {
 	} catch (err) {
 		return res.status(500).json({ error: String(err) });
 	}
-});
-
-// ─── Session proxy endpoints ───────────────────────────────────────────────────
-
-function getCyrusTarget(): DashboardConfig {
-	return (
-		readDashboardConfig() ?? { cyrusUrl: "http://localhost:3456", apiKey: "" }
-	);
-}
-
-app.get("/api/sessions", (_req, res) => {
-	const { cyrusUrl, apiKey } = getCyrusTarget();
-	const url = new URL("/api/sessions", cyrusUrl);
-	const options = {
-		hostname: url.hostname,
-		port: url.port || 3456,
-		path: url.pathname,
-		method: "GET",
-		headers: { Authorization: `Bearer ${apiKey}` },
-	};
-	const proxyReq = http.request(options, (proxyRes) => {
-		res.status(proxyRes.statusCode ?? 200);
-		proxyRes.pipe(res);
-	});
-	proxyReq.on("error", (err) => {
-		res
-			.status(502)
-			.json({ error: "Cyrus not reachable", details: err.message });
-	});
-	proxyReq.end();
-});
-
-app.get("/api/sessions/stream", (req, res) => {
-	const { cyrusUrl, apiKey } = getCyrusTarget();
-	const url = new URL("/api/sessions/stream", cyrusUrl);
-	url.searchParams.set("key", apiKey);
-
-	res.setHeader("Content-Type", "text/event-stream");
-	res.setHeader("Cache-Control", "no-cache");
-	res.setHeader("Connection", "keep-alive");
-
-	const options = {
-		hostname: url.hostname,
-		port: url.port || 3456,
-		path: `${url.pathname}?${url.searchParams}`,
-		method: "GET",
-	};
-	const proxyReq = http.request(options, (proxyRes) => {
-		proxyRes.pipe(res);
-	});
-	proxyReq.on("error", (err) => {
-		res.write(
-			`event: error\ndata: ${JSON.stringify({ error: err.message })}\n\n`,
-		);
-		res.end();
-	});
-	proxyReq.end();
-
-	req.on("close", () => proxyReq.destroy());
 });
 
 // ─── Fallback to index.html for SPA ──────────────────────────────────────────

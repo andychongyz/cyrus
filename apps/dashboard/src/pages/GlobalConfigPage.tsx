@@ -189,6 +189,21 @@ const KNOWN_ENV_KEYS = [
 		hint: "Optional tunnel token",
 	},
 	{ key: "CYRUS_API_KEY", label: "Cyrus API Key", hint: "Dashboard auth key" },
+	{
+		key: "SLACK_BOT_TOKEN",
+		label: "Slack Bot Token",
+		hint: "Enables Slack @mention sessions",
+	},
+	{
+		key: "SLACK_SIGNING_SECRET",
+		label: "Slack Signing Secret",
+		hint: "Required for self-hosted direct webhook verification",
+	},
+	{
+		key: "CYRUS_HOST_EXTERNAL",
+		label: "Cyrus Host External",
+		hint: 'Set to "true" for self-hosted direct Slack webhooks',
+	},
 ];
 
 export function GlobalConfigPage() {

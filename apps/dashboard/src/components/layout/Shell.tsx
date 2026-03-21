@@ -11,14 +11,13 @@ const navItems = [
 
 export function Shell() {
 	const disconnect = useConnectionStore((s) => s.disconnect);
-	const cyrusUrl = useConnectionStore((s) => s.cyrusUrl);
 
 	return (
 		<div className="flex h-screen bg-background">
 			{/* Sidebar */}
 			<aside className="w-56 flex flex-col border-r bg-muted/30">
 				<div className="px-4 py-5 border-b">
-					<p className="text-xs text-muted-foreground truncate">{cyrusUrl}</p>
+					<p className="text-sm font-semibold">Cyrus</p>
 				</div>
 				<nav className="flex-1 py-4 px-2 space-y-1">
 					{navItems.map(({ to, label, icon: Icon }) => (

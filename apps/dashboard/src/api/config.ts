@@ -32,17 +32,13 @@ export async function saveEnv(env: Record<string, string>): Promise<void> {
 	if (!res.ok) throw new Error("Failed to save env");
 }
 
-export async function getDashboardConfig(): Promise<{
-	cyrusUrl: string;
-	apiKey: string;
-}> {
+export async function getDashboardConfig(): Promise<{ apiKey: string }> {
 	const res = await fetch("/api/dashboard-config");
 	if (!res.ok) throw new Error("Failed to fetch dashboard config");
 	return res.json();
 }
 
 export async function saveDashboardConfig(cfg: {
-	cyrusUrl: string;
 	apiKey: string;
 }): Promise<void> {
 	const res = await fetch("/api/dashboard-config", {

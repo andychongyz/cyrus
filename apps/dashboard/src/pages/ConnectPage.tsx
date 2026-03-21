@@ -3,8 +3,7 @@ import { saveDashboardConfig } from "@/api/config";
 import { useConnectionStore } from "@/store/connectionStore";
 
 export function ConnectPage() {
-	const { cyrusUrl, apiKey, setConnection } = useConnectionStore();
-	const [url, setUrl] = useState(cyrusUrl);
+	const { apiKey, setConnection } = useConnectionStore();
 	const [key, setKey] = useState(apiKey);
 	const [error, setError] = useState("");
 	const [loading, setLoading] = useState(false);
@@ -14,10 +13,10 @@ export function ConnectPage() {
 		setLoading(true);
 		setError("");
 		try {
-			const res = await fetch(`${url}/status`);
+			const res = await fetch("/status");
 			if (!res.ok) throw new Error(`Server responded with ${res.status}`);
-			await saveDashboardConfig({ cyrusUrl: url, apiKey: key });
-			setConnection(url, key);
+			await saveDashboardConfig({ apiKey: key });
+			setConnection(key);
 		} catch (err) {
 			setError(err instanceof Error ? err.message : "Could not reach Cyrus");
 		} finally {
@@ -30,20 +29,9 @@ export function ConnectPage() {
 			<div className="w-full max-w-md bg-card border rounded-xl shadow-sm p-8">
 				<h1 className="text-2xl font-bold mb-1">Connect to Cyrus</h1>
 				<p className="text-sm text-muted-foreground mb-6">
-					Enter your Cyrus instance URL and API key to get started.
+					Enter your API key to get started.
 				</p>
 				<form onSubmit={handleConnect} className="space-y-4">
-					<div>
-						<label className="block text-sm font-medium mb-1">Cyrus URL</label>
-						<input
-							type="url"
-							value={url}
-							onChange={(e) => setUrl(e.target.value)}
-							className="w-full border rounded-md px-3 py-2 text-sm bg-background focus:outline-none focus:ring-2 focus:ring-ring"
-							placeholder="http://localhost:3456"
-							required
-						/>
-					</div>
 					<div>
 						<label className="block text-sm font-medium mb-1">API Key</label>
 						<input

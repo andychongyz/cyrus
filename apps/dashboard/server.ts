@@ -60,7 +60,6 @@ function ensureBranchingRulesFile(repoId: string): void {
 // ─── Dashboard connection config ──────────────────────────────────────────────
 
 interface DashboardConfig {
-	cyrusUrl: string;
 	apiKey: string;
 }
 
@@ -267,7 +266,7 @@ app.post("/api/env", (req, res) => {
 
 app.get("/api/dashboard-config", (_req, res) => {
 	const cfg = readDashboardConfig();
-	return res.json(cfg ?? { cyrusUrl: "http://localhost:3456", apiKey: "" });
+	return res.json(cfg ?? { apiKey: "" });
 });
 
 app.post("/api/dashboard-config", (req, res) => {

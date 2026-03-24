@@ -92,6 +92,9 @@ export class ToolPermissionResolver {
 				...mcpToolPermissions,
 				...(userMcpTools ?? []),
 				"Bash(git -C * pull)",
+				"Bash(bin/agent-prod-query:*)",
+				"Bash(bundle exec rails runner:*)",
+				"Bash(cat:*)",
 			]),
 		);
 	}

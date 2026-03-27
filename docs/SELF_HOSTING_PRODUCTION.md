@@ -442,6 +442,45 @@ pm2 restart all
 
 ---
 
+## Ruby on Rails: Pruning Stale Spring Processes (Optional)
+
+If the repositories Cyrus works on use **Ruby on Rails**, the [Spring](https://github.com/rails/spring) application preloader may accumulate stale background processes over time — one server and one app process per worktree session. These are harmless but can consume significant memory on a long-running server.
+
+The `scripts/prune-spring.sh` script cleans them up automatically. A Spring process is considered stale if:
+
+1. Its worktree directory no longer exists (the issue was closed/deleted), **or**
+2. It has been running longer than `MAX_HOURS` (default: 24 hours)
+
+### Set up a daily cron job
+
+```bash
+# Add a cron job to prune stale Spring processes every day at midnight
+(crontab -l 2>/dev/null; echo "0 0 * * * /path/to/cyrus/scripts/prune-spring.sh --kill >> /var/log/prune-spring.log 2>&1") | crontab -
+```
+
+Replace `/path/to/cyrus` with the actual path to your Cyrus repository (e.g. `/root/cyrus-fork`).
+
+### Manual usage
+
+```bash
+# Dry run — see what would be killed without killing anything
+./scripts/prune-spring.sh
+
+# Actually kill stale processes
+./scripts/prune-spring.sh --kill
+
+# Custom age threshold (e.g. 48 hours instead of 24)
+MAX_HOURS=48 ./scripts/prune-spring.sh --kill
+```
+
+By default the script looks for worktrees in `~/.cyrus/worktrees`. Override with:
+
+```bash
+SPRING_WORKTREES_DIR=/custom/path ./scripts/prune-spring.sh --kill
+```
+
+---
+
 ## Troubleshooting
 
 **`cyrus self-auth` fails with "address already in use"**

@@ -1323,6 +1323,9 @@ ${reply.body}
 				githubBotUsername,
 			);
 
+			const githubAppId = process.env.GITHUB_APP_ID || "";
+			prompt = prompt.replace(/\{\{github_app_id\}\}/g, githubAppId);
+
 			const gitlabBotUsername = process.env.GITLAB_BOT_USERNAME || "cyrusagent";
 			prompt = prompt.replace(
 				/\{\{gitlab_bot_username\}\}/g,

@@ -220,9 +220,9 @@ const KNOWN_ENV_KEYS: {
 		hint: "GitHub App webhook secret",
 	},
 	{
-		key: "GITHUB_APP_ID",
-		label: "GitHub App ID",
-		hint: "Numeric App ID from GitHub",
+		key: "GITHUB_BOT_USER_ID",
+		label: "GitHub Bot User ID",
+		hint: "Bot user ID (run: gh api /users/anton-code-agent%5Bbot%5D | jq .id)",
 	},
 	{
 		key: "GITHUB_PRIVATE_KEY",

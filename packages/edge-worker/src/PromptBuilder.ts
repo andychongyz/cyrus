@@ -1323,8 +1323,8 @@ ${reply.body}
 				githubBotUsername,
 			);
 
-			const githubAppId = process.env.GITHUB_APP_ID || "";
-			prompt = prompt.replace(/\{\{github_app_id\}\}/g, githubAppId);
+			const githubBotUserId = process.env.GITHUB_BOT_USER_ID || "";
+			prompt = prompt.replace(/\{\{github_bot_user_id\}\}/g, githubBotUserId);
 
 			const gitlabBotUsername = process.env.GITLAB_BOT_USERNAME || "cyrusagent";
 			prompt = prompt.replace(

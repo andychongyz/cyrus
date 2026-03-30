@@ -20,7 +20,7 @@ Changelog updates are complete with PR link. Now commit all changes and push to 
 Every commit message MUST end with a `Co-Authored-By` trailer for the bot identity. Append this as the last line of the commit message, separated by a blank line from the commit body:
 
 ```
-Co-Authored-By: {{github_bot_username}} <{{github_app_id}}+{{github_bot_username}}@users.noreply.github.com>
+Co-Authored-By: {{github_bot_username}} <{{github_bot_user_id}}+{{github_bot_username}}@users.noreply.github.com>
 ```
 
 Example:
@@ -30,7 +30,7 @@ feat: add user authentication
 
 Implement OAuth2 login flow with session management.
 
-Co-Authored-By: {{github_bot_username}} <{{github_app_id}}+{{github_bot_username}}@users.noreply.github.com>
+Co-Authored-By: {{github_bot_username}} <{{github_bot_user_id}}+{{github_bot_username}}@users.noreply.github.com>
 ```
 
 ## Important Notes

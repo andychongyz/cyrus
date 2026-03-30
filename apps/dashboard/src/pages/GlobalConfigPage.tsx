@@ -158,7 +158,12 @@ function LinearWorkspacesEditor({
 		</div>
 	);
 }
-const KNOWN_ENV_KEYS = [
+const KNOWN_ENV_KEYS: {
+	key: string;
+	label: string;
+	hint: string;
+	multiline?: boolean;
+}[] = [
 	{
 		key: "ANTHROPIC_API_KEY",
 		label: "Anthropic API Key",
@@ -203,6 +208,27 @@ const KNOWN_ENV_KEYS = [
 		key: "CYRUS_HOST_EXTERNAL",
 		label: "Cyrus Host External",
 		hint: 'Set to "true" for self-hosted direct Slack webhooks',
+	},
+	{
+		key: "GITHUB_BOT_USERNAME",
+		label: "GitHub Bot Username",
+		hint: "e.g. anton[bot]",
+	},
+	{
+		key: "GITHUB_WEBHOOK_SECRET",
+		label: "GitHub Webhook Secret",
+		hint: "GitHub App webhook secret",
+	},
+	{
+		key: "GITHUB_APP_ID",
+		label: "GitHub App ID",
+		hint: "Numeric App ID from GitHub",
+	},
+	{
+		key: "GITHUB_PRIVATE_KEY",
+		label: "GitHub Private Key",
+		hint: "PEM private key for the GitHub App",
+		multiline: true,
 	},
 ];
 
@@ -406,7 +432,7 @@ export function GlobalConfigPage() {
 						changed.
 					</p>
 					<div className="space-y-2">
-						{KNOWN_ENV_KEYS.map(({ key, label, hint }) => {
+						{KNOWN_ENV_KEYS.map(({ key, label, hint, multiline }) => {
 							const existing = envData?.env?.[key];
 							const isSecret = existing?.isSecret ?? true;
 							return (
@@ -419,22 +445,45 @@ export function GlobalConfigPage() {
 											</span>
 										)}
 									</label>
-									<input
-										type={isSecret ? "password" : "text"}
-										defaultValue={isSecret ? "" : (existing?.value ?? "")}
-										placeholder={
-											isSecret && existing
-												? "••••••••  (leave blank to keep)"
-												: ""
-										}
-										onChange={(e) =>
-											setEnvValues((prev) => ({
-												...prev,
-												[key]: e.target.value,
-											}))
-										}
-										className="w-full border rounded-md px-3 py-1.5 text-sm bg-background focus:outline-none focus:ring-2 focus:ring-ring"
-									/>
+									{multiline ? (
+										<textarea
+											defaultValue={
+												isSecret
+													? ""
+													: (existing?.value ?? "").replace(/\\n/g, "\n")
+											}
+											placeholder={
+												isSecret && existing
+													? "••••••••  (leave blank to keep)"
+													: "Paste PEM key here"
+											}
+											rows={4}
+											onChange={(e) =>
+												setEnvValues((prev) => ({
+													...prev,
+													[key]: e.target.value.replace(/\n/g, "\\n"),
+												}))
+											}
+											className="w-full border rounded-md px-3 py-1.5 text-sm bg-background focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+										/>
+									) : (
+										<input
+											type={isSecret ? "password" : "text"}
+											defaultValue={isSecret ? "" : (existing?.value ?? "")}
+											placeholder={
+												isSecret && existing
+													? "••••••••  (leave blank to keep)"
+													: ""
+											}
+											onChange={(e) =>
+												setEnvValues((prev) => ({
+													...prev,
+													[key]: e.target.value,
+												}))
+											}
+											className="w-full border rounded-md px-3 py-1.5 text-sm bg-background focus:outline-none focus:ring-2 focus:ring-ring"
+										/>
+									)}
 								</div>
 							);
 						})}

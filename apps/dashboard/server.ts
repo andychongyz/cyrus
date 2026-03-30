@@ -198,6 +198,8 @@ const SECRET_KEYS = new Set([
 	"NGROK_AUTH_TOKEN",
 	"SLACK_BOT_TOKEN",
 	"SLACK_SIGNING_SECRET",
+	"GITHUB_WEBHOOK_SECRET",
+	"GITHUB_PRIVATE_KEY",
 ]);
 
 function parseEnvFile(content: string): Record<string, string> {

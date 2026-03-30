@@ -245,6 +245,10 @@ For Cyrus to create pull requests, configure Git and GitHub CLI authentication.
 
 See the **[Git & GitHub Setup Guide](./GIT_GITHUB.md)** for complete instructions.
 
+For bot-identity commits and org-wide access without personal tokens, set up a **GitHub App**:
+
+See the **[GitHub App Setup Guide](./GITHUB_APP.md)** for complete instructions.
+
 ---
 
 ## Running as a Service

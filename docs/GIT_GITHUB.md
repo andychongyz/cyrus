@@ -92,6 +92,14 @@ gh auth status
 
 ---
 
+## GitHub App (Recommended for Organizations)
+
+For production use or org-wide deployments, a **GitHub App** is preferred over personal tokens — it provides a dedicated bot identity, scoped repository access, and auto-refreshing short-lived tokens.
+
+See the **[GitHub App Setup Guide](./GITHUB_APP.md)**.
+
+---
+
 ## Security Considerations
 
 - **Use a dedicated account** for Cyrus if you want to limit its access

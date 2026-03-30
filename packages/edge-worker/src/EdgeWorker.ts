@@ -123,6 +123,8 @@ import { ActivityPoster } from "./ActivityPoster.js";
 import { AgentSessionManager } from "./AgentSessionManager.js";
 import { AskUserQuestionHandler } from "./AskUserQuestionHandler.js";
 import { AttachmentService } from "./AttachmentService.js";
+import type { BranchElicitationChoice } from "./BranchElicitationHandler.js";
+import { BranchElicitationHandler } from "./BranchElicitationHandler.js";
 import { ChatSessionHandler } from "./ChatSessionHandler.js";
 import { ConfigManager, type RepositoryChanges } from "./ConfigManager.js";
 import { GitService } from "./GitService.js";
@@ -207,6 +209,8 @@ export class EdgeWorker extends EventEmitter {
 	private activeWebhookCount = 0; // Track number of webhooks currently being processed
 	/** Handler for AskUserQuestion tool invocations via Linear select signal */
 	private askUserQuestionHandler: AskUserQuestionHandler;
+	/** Handler for interactive branch elicitation before worktree creation */
+	private branchElicitationHandler: BranchElicitationHandler;
 	/** User access control for whitelisting/blacklisting Linear users */
 	private userAccessControl: UserAccessControl;
 	private logger: ILogger;
@@ -312,6 +316,12 @@ export class EdgeWorker extends EventEmitter {
 			getIssueTracker: (linearWorkspaceId: string) => {
 				return this.getIssueTrackerForWorkspace(linearWorkspaceId) ?? null;
 			},
+		});
+
+		// Initialize branch elicitation handler for interactive branching
+		this.branchElicitationHandler = new BranchElicitationHandler({
+			getIssueTracker: (linearWorkspaceId: string) =>
+				this.getIssueTrackerForWorkspace(linearWorkspaceId) ?? null,
 		});
 
 		// Initialize shared application server
@@ -3640,6 +3650,7 @@ ${taskSection}`;
 	 * @param guidance Optional guidance rules from Linear
 	 * @param commentBody Optional comment body (for mentions)
 	 * @param baseBranchOverrides Per-repo base branch overrides from [repo=name#branch] syntax
+	 * @param branchElicitationChoice Pre-resolved branch choice from user elicitation (hotfix vs normal)
 	 */
 	private async initializeAgentRunner(
 		agentSession: AgentSessionCreatedWebhook["agentSession"],
@@ -3649,6 +3660,7 @@ ${taskSection}`;
 		commentBody?: string | null,
 		baseBranchOverrides?: Map<string, string>,
 		routingMethod?: string,
+		branchElicitationChoice?: BranchElicitationChoice,
 	): Promise<void> {
 		const sessionId = agentSession.id;
 		const { issue } = agentSession;
@@ -3694,6 +3706,77 @@ ${taskSection}`;
 
 		// Post instant acknowledgment thought
 		await this.postInstantAcknowledgment(sessionId, linearWorkspaceId);
+
+		// ── Branch elicitation: ask user about urgency before creating worktree ──
+		// Fetch labels early (using issue tracker service, not the full Issue object
+		// which isn't available until after createCyrusAgentSession)
+		let earlyLabels: string[] = [];
+		try {
+			const issueTracker = this.getIssueTrackerForWorkspace(linearWorkspaceId);
+			if (issueTracker?.getIssueLabels) {
+				const labels = await issueTracker.getIssueLabels(issue.id);
+				if (Array.isArray(labels)) {
+					earlyLabels = labels.filter(
+						(l): l is string => typeof l === "string",
+					);
+				}
+			}
+		} catch (err) {
+			log.warn(`Failed to fetch early labels for branch elicitation: ${err}`);
+		}
+		const earlyLowercaseLabels = earlyLabels.map((l) => l.toLowerCase());
+		const primaryRepoId = primaryRepo.id;
+
+		if (this.branchElicitationHandler.hasHotfixLabel(earlyLowercaseLabels)) {
+			// Hotfix label found — auto-resolve without asking (uses branching rules if available)
+			const hotfixChoice =
+				this.branchElicitationHandler.resolveAutoHotfix(primaryRepoId);
+			log.info(
+				`Hotfix label detected, auto-resolving branch: ${hotfixChoice.baseBranch} with prefix ${hotfixChoice.prefix}`,
+			);
+			baseBranchOverrides = this.applyBranchElicitationChoice(
+				hotfixChoice,
+				repositories,
+				baseBranchOverrides,
+			);
+		} else if (branchElicitationChoice) {
+			// Branch elicitation choice was provided (from webhook response)
+			log.info(
+				`Using elicited branch choice: ${branchElicitationChoice.baseBranch} with prefix ${branchElicitationChoice.prefix}`,
+			);
+			baseBranchOverrides = this.applyBranchElicitationChoice(
+				branchElicitationChoice,
+				repositories,
+				baseBranchOverrides,
+			);
+		} else if (
+			this.branchElicitationHandler.shouldElicit(
+				earlyLowercaseLabels,
+				primaryRepoId,
+			)
+		) {
+			// No hotfix label, branching rules exist, no prior choice — ask the user
+			log.info("No hotfix label found, eliciting branch choice from user");
+			// Fire-and-forget: the promise resolves when user responds via webhook.
+			// We store the resume context so handleBranchElicitationResponse can
+			// continue initializeAgentRunner.
+			this.branchElicitationHandler.elicitBranchChoice(
+				sessionId,
+				linearWorkspaceId,
+				primaryRepoId,
+				{
+					agentSession,
+					repositories,
+					linearWorkspaceId,
+					guidance,
+					commentBody,
+					baseBranchOverrides,
+					routingMethod,
+				},
+			);
+			return; // Defer — session creation continues when user responds
+		}
+		// else: no branching rules file — skip elicitation, proceed normally
 
 		// Create the session using the shared method (pass full repositories array)
 		const sessionData = await this.createCyrusAgentSession(
@@ -4197,6 +4280,65 @@ ${taskSection}`;
 	}
 
 	/**
+	 * Handle user response to branch elicitation (hotfix vs normal).
+	 * Resumes initializeAgentRunner with the chosen base branch override.
+	 */
+	private async handleBranchElicitationResponse(
+		webhook: AgentSessionPromptedWebhook,
+	): Promise<void> {
+		const { agentSession, agentActivity } = webhook;
+		const agentSessionId = agentSession.id;
+
+		if (!agentActivity) {
+			this.logger.warn(
+				"Cannot handle branch elicitation response without agentActivity",
+			);
+			this.branchElicitationHandler.cancelPendingElicitation(
+				agentSessionId,
+				"No agent activity in webhook",
+			);
+			return;
+		}
+
+		const userResponse = agentActivity.content?.body || "";
+
+		this.logger.debug(
+			`Processing branch elicitation response for session ${agentSessionId}: "${userResponse}"`,
+		);
+
+		const result = this.branchElicitationHandler.handleUserResponse(
+			agentSessionId,
+			userResponse,
+		);
+
+		if (!result) {
+			this.logger.warn(
+				`Branch elicitation response not handled for session ${agentSessionId} (no pending elicitation)`,
+			);
+			return;
+		}
+
+		const { choice, resumeContext } = result;
+
+		this.logger.info(
+			`Branch elicitation resolved for session ${agentSessionId}: ` +
+				`${choice.isHotfix ? "hotfix" : "normal"} → ${choice.baseBranch} with ${choice.prefix}/ prefix`,
+		);
+
+		// Resume session creation with the chosen branch
+		await this.initializeAgentRunner(
+			resumeContext.agentSession,
+			[...resumeContext.repositories],
+			resumeContext.linearWorkspaceId,
+			resumeContext.guidance,
+			resumeContext.commentBody,
+			resumeContext.baseBranchOverrides,
+			resumeContext.routingMethod,
+			choice,
+		);
+	}
+
+	/**
 	 * Handle normal prompted activity (existing session continuation)
 	 * Branch 3 of agentSessionPrompted (see packages/CLAUDE.md)
 	 */
@@ -4449,6 +4591,14 @@ ${taskSection}`;
 			return;
 		}
 
+		// Branch 2.6: Handle branch elicitation response
+		// User answered whether this is a hotfix or normal change.
+		// Resume session creation with the chosen base branch.
+		if (this.branchElicitationHandler.hasPendingElicitation(agentSessionId)) {
+			await this.handleBranchElicitationResponse(webhook);
+			return;
+		}
+
 		// Branch 3: Handle normal prompted activity (existing session continuation)
 		// Per CLAUDE.md: "an agentSession MUST exist and a repository MUST already
 		// be associated with the Linear issue. The repository will be retrieved from
@@ -4615,6 +4765,24 @@ ${taskSection}`;
 	 */
 	private async fetchIssueLabels(issue: Issue): Promise<string[]> {
 		return this.promptBuilder.fetchIssueLabels(issue);
+	}
+
+	/**
+	 * Apply a branch elicitation choice as base branch overrides for all repositories.
+	 */
+	private applyBranchElicitationChoice(
+		choice: BranchElicitationChoice,
+		repositories: readonly RepositoryConfig[],
+		existingOverrides?: Map<string, string>,
+	): Map<string, string> {
+		const overrides = new Map(existingOverrides ?? []);
+		for (const repo of repositories) {
+			// Only set if no existing override (e.g. from [repo=name#branch] syntax)
+			if (!overrides.has(repo.id)) {
+				overrides.set(repo.id, choice.baseBranch);
+			}
+		}
+		return overrides;
 	}
 
 	/**

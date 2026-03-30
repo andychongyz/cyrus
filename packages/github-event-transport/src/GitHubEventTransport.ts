@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, createSign, timingSafeEqual } from "node:crypto";
 import { EventEmitter } from "node:events";
 import type { TranslationContext } from "cyrus-core";
 import { createLogger, type ILogger } from "cyrus-core";
@@ -47,6 +47,10 @@ export class GitHubEventTransport extends EventEmitter {
 	private logger: ILogger;
 	private messageTranslator: GitHubMessageTranslator;
 	private translationContext: TranslationContext;
+	private installationTokenCache: Map<
+		number,
+		{ token: string; expiresAt: number }
+	> = new Map();
 
 	constructor(
 		config: GitHubEventTransportConfig,
@@ -162,7 +166,7 @@ export class GitHubEventTransport extends EventEmitter {
 				return;
 			}
 
-			this.processAndEmitEvent(request, reply);
+			await this.processAndEmitEvent(request, reply);
 		} catch (error) {
 			const err = new Error("Signature verification failed");
 			if (error instanceof Error) {
@@ -194,7 +198,7 @@ export class GitHubEventTransport extends EventEmitter {
 		}
 
 		try {
-			this.processAndEmitEvent(request, reply);
+			await this.processAndEmitEvent(request, reply);
 		} catch (error) {
 			const err = new Error("Proxy webhook processing failed");
 			if (error instanceof Error) {
@@ -208,14 +212,14 @@ export class GitHubEventTransport extends EventEmitter {
 	/**
 	 * Process the webhook request and emit the appropriate event
 	 */
-	private processAndEmitEvent(
+	private async processAndEmitEvent(
 		request: FastifyRequest,
 		reply: FastifyReply,
-	): void {
+	): Promise<void> {
 		const eventType = request.headers["x-github-event"] as string;
 		const deliveryId =
 			(request.headers["x-github-delivery"] as string) || "unknown";
-		const installationToken = request.headers["x-github-installation-token"] as
+		let installationToken = request.headers["x-github-installation-token"] as
 			| string
 			| undefined;
 
@@ -255,6 +259,13 @@ export class GitHubEventTransport extends EventEmitter {
 			return;
 		}
 
+		// If no token was forwarded by a proxy, try to generate one from App credentials
+		if (!installationToken && payload.installation?.id) {
+			installationToken =
+				(await this.fetchInstallationToken(payload.installation.id)) ??
+				undefined;
+		}
+
 		const webhookEvent: GitHubWebhookEvent = {
 			eventType: eventType as GitHubEventType,
 			deliveryId,
@@ -287,6 +298,89 @@ export class GitHubEventTransport extends EventEmitter {
 			this.emit("message", result.message);
 		} else {
 			this.logger.debug(`Message translation skipped: ${result.reason}`);
+		}
+	}
+
+	/**
+	 * Generate a short-lived GitHub App JWT for API authentication.
+	 * The JWT is valid for 10 minutes (GitHub's maximum is 10 minutes).
+	 */
+	private generateAppJWT(appId: string, privateKey: string): string {
+		const now = Math.floor(Date.now() / 1000);
+		const header = Buffer.from(
+			JSON.stringify({ alg: "RS256", typ: "JWT" }),
+		).toString("base64url");
+		const jwtPayload = Buffer.from(
+			JSON.stringify({ iat: now - 60, exp: now + 600, iss: appId }),
+		).toString("base64url");
+		const sign = createSign("SHA256");
+		sign.write(`${header}.${jwtPayload}`);
+		sign.end();
+		const signature = sign.sign(privateKey, "base64url");
+		return `${header}.${jwtPayload}.${signature}`;
+	}
+
+	/**
+	 * Fetch a short-lived installation access token from GitHub using App credentials.
+	 * Tokens are cached per installation ID until 5 minutes before expiry.
+	 */
+	private async fetchInstallationToken(
+		installationId: number,
+	): Promise<string | null> {
+		const cached = this.installationTokenCache.get(installationId);
+		if (cached && cached.expiresAt > Date.now()) {
+			return cached.token;
+		}
+
+		const appId = process.env.GITHUB_APP_ID;
+		const privateKey = process.env.GITHUB_PRIVATE_KEY?.replace(/\\n/g, "\n");
+		if (!appId || !privateKey) {
+			this.logger.debug(
+				"GITHUB_APP_ID or GITHUB_PRIVATE_KEY not set; skipping installation token generation",
+			);
+			return null;
+		}
+
+		try {
+			const jwt = this.generateAppJWT(appId, privateKey);
+			const response = await fetch(
+				`https://api.github.com/app/installations/${installationId}/access_tokens`,
+				{
+					method: "POST",
+					headers: {
+						Authorization: `Bearer ${jwt}`,
+						Accept: "application/vnd.github+json",
+						"X-GitHub-Api-Version": "2022-11-28",
+					},
+				},
+			);
+
+			if (!response.ok) {
+				this.logger.warn(
+					`Failed to generate installation token for installation ${installationId}: ${response.status}`,
+				);
+				return null;
+			}
+
+			const data = (await response.json()) as {
+				token: string;
+				expires_at: string;
+			};
+			// Cache until 5 minutes before expiry
+			const expiresAt = new Date(data.expires_at).getTime() - 5 * 60 * 1000;
+			this.installationTokenCache.set(installationId, {
+				token: data.token,
+				expiresAt,
+			});
+			this.logger.debug(
+				`Generated installation token for installation ${installationId}`,
+			);
+			return data.token;
+		} catch (err) {
+			this.logger.warn(
+				`Error generating installation token: ${err instanceof Error ? err.message : err}`,
+			);
+			return null;
 		}
 	}
 

@@ -210,6 +210,11 @@ const KNOWN_ENV_KEYS: {
 		hint: 'Set to "true" for self-hosted direct Slack webhooks',
 	},
 	{
+		key: "GITHUB_APP_ID",
+		label: "GitHub App ID",
+		hint: "Numeric App ID from your GitHub App settings",
+	},
+	{
 		key: "GITHUB_BOT_USERNAME",
 		label: "GitHub Bot Username",
 		hint: "e.g. anton[bot]",

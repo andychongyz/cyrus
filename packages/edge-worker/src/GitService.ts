@@ -666,10 +666,12 @@ export class GitService {
 
 			// Determine base branch early (commit-ish > graphite > parent > default)
 			// This runs before worktree existence checks so all return paths have the resolution
-			const resolution = await this.determineBaseBranch(
+			// Explicit override (from hotfix elicitation or [repo=name#branch] syntax) takes
+			// precedence over LLM-resolved branch rule so user choices are never silently discarded.
+			let resolution = await this.determineBaseBranch(
 				issue,
 				repository,
-				branchRule?.base ?? baseBranchOverride,
+				baseBranchOverride ?? branchRule?.base,
 			);
 			const baseBranch = resolution.branch;
 
@@ -818,6 +820,12 @@ export class GitService {
 							);
 							const defaultRemoteBranch = `origin/${repository.baseBranch}`;
 							worktreeCmd = `git worktree add --track -b "${branchName}" "${workspacePath}" "${defaultRemoteBranch}"`;
+							// Update resolution to reflect the actual branch used so the system prompt is accurate
+							resolution = {
+								branch: repository.baseBranch,
+								source: "default",
+								detail: `Fell back to repository default (${repository.baseBranch}) because '${baseBranch}' was not found`,
+							};
 						}
 					}
 				} else {

@@ -929,6 +929,21 @@ export class GitService {
 		// In multi-repo layouts, there may be subdirectories that are each worktrees.
 		const worktreePaths = this.findWorktreesUnderPath(workspacePath);
 
+		// Stop Spring preloader processes before deleting — best-effort, safe if Spring
+		// is not installed or not running (spring stop exits 0 in both cases).
+		for (const wtPath of worktreePaths) {
+			try {
+				execSync("bundle exec spring stop", {
+					cwd: wtPath,
+					stdio: "pipe",
+					timeout: 10_000,
+				});
+				this.logger.info(`Stopped Spring server in ${wtPath}`);
+			} catch {
+				// Spring not present or not running — nothing to do
+			}
+		}
+
 		// Collect parent repository paths so we can prune stale entries after deletion
 		const parentRepoPaths = new Set<string>();
 

@@ -9,10 +9,15 @@
  * If the issue already has a "hotfix" label, the question is skipped and
  * the hotfix branch config is used automatically.
  *
+ * Branch targets are extracted from BRANCHING_RULES.md using an LLM
+ * (Haiku) to handle free-form markdown reliably. Falls back to hardcoded
+ * defaults when the API key is missing or the call fails.
+ *
  * Follows the same "elicit and wait" pattern as AskUserQuestionHandler
  * and RepositoryRouter.elicitUserRepositorySelection.
  */
 
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -25,8 +30,6 @@ import type {
 } from "cyrus-core";
 import { AgentActivitySignal, createLogger } from "cyrus-core";
 
-// BranchRule type from BranchRulesResolver is not needed here — we parse rules independently
-
 // ── Types ───────────────────────────────────────────────────────────
 
 export interface BranchElicitationChoice {
@@ -38,15 +41,24 @@ export interface BranchElicitationChoice {
 	readonly prefix: string;
 }
 
-export interface ParsedBranchTargets {
-	/** Base branch for hotfix (e.g. "master") */
-	readonly hotfixBase: string;
-	/** Prefix for hotfix branches (e.g. "hotfix") */
-	readonly hotfixPrefix: string;
-	/** Base branch for normal work (e.g. "develop") */
-	readonly normalBase: string;
-	/** Prefix for normal branches (e.g. "feature") */
-	readonly normalPrefix: string;
+/** A single branch option extracted from BRANCHING_RULES.md by the LLM. */
+export interface ParsedBranchOption {
+	/** Short user-facing label (e.g. "Hotfix — urgent, deploy immediately") */
+	readonly label: string;
+	/** One-line description of what this option does (e.g. "Branch from `master` with `hotfix/` prefix") */
+	readonly description: string;
+	/** Git base branch to branch from */
+	readonly baseBranch: string;
+	/** Branch name prefix (without trailing /) */
+	readonly prefix: string;
+}
+
+/** The full elicitation prompt extracted from BRANCHING_RULES.md. */
+export interface ParsedElicitation {
+	/** Question to ask the user (e.g. "Is this issue urgent?") */
+	readonly question: string;
+	/** Exactly two options: [0] = hotfix/urgent, [1] = normal/default */
+	readonly options: readonly [ParsedBranchOption, ParsedBranchOption];
 }
 
 /**
@@ -56,8 +68,8 @@ export interface ParsedBranchTargets {
 export interface PendingBranchElicitation {
 	/** Promise resolver called when the user responds */
 	readonly resolve: (choice: BranchElicitationChoice) => void;
-	/** Parsed branch targets from BRANCHING_RULES.md */
-	readonly targets: ParsedBranchTargets;
+	/** Parsed elicitation from BRANCHING_RULES.md */
+	readonly elicitation: ParsedElicitation;
 	/** All context needed to resume initializeAgentRunner */
 	readonly resumeContext: BranchElicitationResumeContext;
 }
@@ -78,15 +90,53 @@ export interface BranchElicitationHandlerDeps {
 
 // ── Constants ───────────────────────────────────────────────────────
 
-const DEFAULT_HOTFIX_BASE = "master";
-const DEFAULT_HOTFIX_PREFIX = "hotfix";
-const DEFAULT_NORMAL_BASE = "develop";
-const DEFAULT_NORMAL_PREFIX = "feature";
-
 const HOTFIX_LABELS = ["hotfix", "urgent", "critical", "production"];
 
-const HOTFIX_OPTION = "Hotfix — urgent, deploy to production immediately";
-const NORMAL_OPTION = "Normal — include in next release";
+/** Default elicitation used when no BRANCHING_RULES.md exists or LLM parsing fails. */
+const DEFAULT_ELICITATION: ParsedElicitation = {
+	question: "Is this issue urgent?",
+	options: [
+		{
+			label: "Hotfix — urgent, deploy to production immediately",
+			description: "Branch from `master` with `hotfix/` prefix",
+			baseBranch: "master",
+			prefix: "hotfix",
+		},
+		{
+			label: "Normal — include in next release",
+			description: "Branch from `develop` with `feature/` prefix",
+			baseBranch: "develop",
+			prefix: "feature",
+		},
+	],
+};
+
+const LLM_SYSTEM_PROMPT = `You are a branch-rule parser. Given a BRANCHING_RULES.md file, extract the two branch strategies it describes and return ONLY valid JSON in this exact format (no markdown, no explanation):
+
+{
+  "question": "<short question to ask the user, e.g. Is this issue urgent?>",
+  "options": [
+    {
+      "label": "<short label for the urgent/hotfix option>",
+      "description": "<one-line description, e.g. Branch from \`master\` with \`hotfix/\` prefix>",
+      "baseBranch": "<git branch name>",
+      "prefix": "<branch name prefix without trailing slash>"
+    },
+    {
+      "label": "<short label for the normal/default option>",
+      "description": "<one-line description, e.g. Branch from \`develop\` with \`feature/\` prefix>",
+      "baseBranch": "<git branch name>",
+      "prefix": "<branch name prefix without trailing slash>"
+    }
+  ]
+}
+
+Rules:
+- The first option must be the urgent/hotfix option
+- The second option must be the normal/default option
+- Keep labels concise (under 60 characters)
+- Include backtick-formatted branch names in descriptions
+- prefix must NOT include a trailing slash`;
 
 // ── Handler ─────────────────────────────────────────────────────────
 
@@ -97,6 +147,8 @@ export class BranchElicitationHandler {
 		string,
 		PendingBranchElicitation
 	>();
+	/** Cache parsed elicitations by repoId to avoid redundant LLM calls. */
+	private readonly elicitationCache = new Map<string, ParsedElicitation>();
 
 	constructor(deps: BranchElicitationHandlerDeps, logger?: ILogger) {
 		this.deps = deps;
@@ -114,7 +166,6 @@ export class BranchElicitationHandler {
 	 * 2. No hotfix-related label is present on the issue
 	 */
 	shouldElicit(lowercaseLabels: readonly string[], repoId: string): boolean {
-		// Only elicit when the repo has branching rules configured
 		const filePath = join(
 			homedir(),
 			".cyrus",
@@ -140,12 +191,13 @@ export class BranchElicitationHandler {
 	 * Resolve the branch choice for an issue that already has a hotfix label.
 	 * Skips the question — returns the hotfix branch config immediately.
 	 */
-	resolveAutoHotfix(repoId: string): BranchElicitationChoice {
-		const targets = this.parseBranchTargets(repoId);
+	async resolveAutoHotfix(repoId: string): Promise<BranchElicitationChoice> {
+		const elicitation = await this.parseElicitation(repoId);
+		const hotfix = elicitation.options[0];
 		return {
 			isHotfix: true,
-			baseBranch: targets.hotfixBase,
-			prefix: targets.hotfixPrefix,
+			baseBranch: hotfix.baseBranch,
+			prefix: hotfix.prefix,
 		};
 	}
 
@@ -166,12 +218,12 @@ export class BranchElicitationHandler {
 			this.logger.error(
 				`No issue tracker found for workspace ${linearWorkspaceId}`,
 			);
-			// Fall back to normal branch
-			const targets = this.parseBranchTargets(repoId);
+			const elicitation = await this.parseElicitation(repoId);
+			const normal = elicitation.options[1];
 			return {
 				isHotfix: false,
-				baseBranch: targets.normalBase,
-				prefix: targets.normalPrefix,
+				baseBranch: normal.baseBranch,
+				prefix: normal.prefix,
 			};
 		}
 
@@ -186,16 +238,20 @@ export class BranchElicitationHandler {
 			);
 		}
 
-		const targets = this.parseBranchTargets(repoId);
+		const elicitation = await this.parseElicitation(repoId);
+		const [hotfixOption, normalOption] = elicitation.options;
 
 		// Post the select signal to Linear
-		const options = [{ value: HOTFIX_OPTION }, { value: NORMAL_OPTION }];
+		const options = [
+			{ value: hotfixOption.label },
+			{ value: normalOption.label },
+		];
 
 		const body = [
-			"**Is this issue urgent?**",
+			`**${elicitation.question}**`,
 			"",
-			`• **${HOTFIX_OPTION}**: Branch from \`${targets.hotfixBase}\` with \`${targets.hotfixPrefix}/\` prefix`,
-			`• **${NORMAL_OPTION}**: Branch from \`${targets.normalBase}\` with \`${targets.normalPrefix}/\` prefix`,
+			`• **${hotfixOption.label}**: ${hotfixOption.description}`,
+			`• **${normalOption.label}**: ${normalOption.description}`,
 		].join("\n");
 
 		try {
@@ -215,11 +271,10 @@ export class BranchElicitationHandler {
 		} catch (error) {
 			const errorMessage = (error as Error).message || String(error);
 			this.logger.error(`Failed to post branch elicitation: ${errorMessage}`);
-			// Fall back to normal
 			return {
 				isHotfix: false,
-				baseBranch: targets.normalBase,
-				prefix: targets.normalPrefix,
+				baseBranch: normalOption.baseBranch,
+				prefix: normalOption.prefix,
 			};
 		}
 
@@ -227,7 +282,7 @@ export class BranchElicitationHandler {
 		return new Promise<BranchElicitationChoice>((resolve) => {
 			this.pendingElicitations.set(agentSessionId, {
 				resolve,
-				targets,
+				elicitation,
 				resumeContext,
 			});
 		});
@@ -259,22 +314,22 @@ export class BranchElicitationHandler {
 			`User responded to branch elicitation for session ${agentSessionId}: ${selectedValue}`,
 		);
 
-		const isHotfix =
-			selectedValue.toLowerCase().includes("hotfix") ||
-			selectedValue.toLowerCase().includes("urgent") ||
-			selectedValue.toLowerCase().includes("production");
+		const [hotfixOption, normalOption] = pending.elicitation.options;
 
-		const choice: BranchElicitationChoice = isHotfix
-			? {
-					isHotfix: true,
-					baseBranch: pending.targets.hotfixBase,
-					prefix: pending.targets.hotfixPrefix,
-				}
-			: {
-					isHotfix: false,
-					baseBranch: pending.targets.normalBase,
-					prefix: pending.targets.normalPrefix,
-				};
+		// Match the selected value against the hotfix option label or common keywords
+		const lowerSelected = selectedValue.toLowerCase();
+		const isHotfix =
+			lowerSelected.includes(hotfixOption.label.toLowerCase()) ||
+			lowerSelected.includes("hotfix") ||
+			lowerSelected.includes("urgent") ||
+			lowerSelected.includes("production");
+
+		const chosen = isHotfix ? hotfixOption : normalOption;
+		const choice: BranchElicitationChoice = {
+			isHotfix,
+			baseBranch: chosen.baseBranch,
+			prefix: chosen.prefix,
+		};
 
 		const { resumeContext } = pending;
 
@@ -301,10 +356,11 @@ export class BranchElicitationHandler {
 			this.logger.debug(
 				`Cancelling branch elicitation for session ${agentSessionId}: ${reason}`,
 			);
+			const normalOption = pending.elicitation.options[1];
 			pending.resolve({
 				isHotfix: false,
-				baseBranch: pending.targets.normalBase,
-				prefix: pending.targets.normalPrefix,
+				baseBranch: normalOption.baseBranch,
+				prefix: normalOption.prefix,
 			});
 			this.pendingElicitations.delete(agentSessionId);
 		}
@@ -320,10 +376,22 @@ export class BranchElicitationHandler {
 	// ── Internal ──────────────────────────────────────────────────────
 
 	/**
-	 * Parse BRANCHING_RULES.md for a repo to extract hotfix/normal base + prefix.
-	 * Falls back to hardcoded defaults if the file doesn't exist or can't be parsed.
+	 * Parse BRANCHING_RULES.md for a repo using `claude -p` (Claude Code CLI
+	 * in print mode) to extract the elicitation question and branch options.
+	 *
+	 * Uses whatever auth is already configured (OAuth, API key, etc.)
+	 * so no separate ANTHROPIC_API_KEY is required.
+	 *
+	 * Falls back to hardcoded defaults if:
+	 * - The file doesn't exist or can't be read
+	 * - The `claude` CLI is not available
+	 * - The LLM returns invalid JSON
 	 */
-	parseBranchTargets(repoId: string): ParsedBranchTargets {
+	async parseElicitation(repoId: string): Promise<ParsedElicitation> {
+		// Check cache first
+		const cached = this.elicitationCache.get(repoId);
+		if (cached) return cached;
+
 		const filePath = join(
 			homedir(),
 			".cyrus",
@@ -333,72 +401,105 @@ export class BranchElicitationHandler {
 		);
 
 		if (!existsSync(filePath)) {
-			return {
-				hotfixBase: DEFAULT_HOTFIX_BASE,
-				hotfixPrefix: DEFAULT_HOTFIX_PREFIX,
-				normalBase: DEFAULT_NORMAL_BASE,
-				normalPrefix: DEFAULT_NORMAL_PREFIX,
-			};
+			return DEFAULT_ELICITATION;
 		}
 
-		let content: string;
+		let rulesContent: string;
 		try {
-			content = readFileSync(filePath, "utf-8");
+			rulesContent = readFileSync(filePath, "utf-8");
 		} catch {
-			return {
-				hotfixBase: DEFAULT_HOTFIX_BASE,
-				hotfixPrefix: DEFAULT_HOTFIX_PREFIX,
-				normalBase: DEFAULT_NORMAL_BASE,
-				normalPrefix: DEFAULT_NORMAL_PREFIX,
-			};
+			return DEFAULT_ELICITATION;
 		}
 
-		return this.parseRulesContent(content);
+		try {
+			const prompt = `${LLM_SYSTEM_PROMPT}\n\nHere is the BRANCHING_RULES.md content to parse:\n\n${rulesContent}`;
+
+			let text = execFileSync(
+				"claude",
+				[
+					"-p",
+					prompt,
+					"--no-session-persistence",
+					"--output-format",
+					"text",
+					"--model",
+					"haiku",
+					"--tools",
+					"",
+				],
+				{
+					encoding: "utf-8",
+					timeout: 30_000,
+					stdio: ["pipe", "pipe", "pipe"],
+				},
+			).trim();
+
+			if (!text) return DEFAULT_ELICITATION;
+
+			// Strip markdown code fences that LLMs sometimes include
+			text = text
+				.replace(/^```(?:json)?\s*\n?/i, "")
+				.replace(/\n?```\s*$/i, "")
+				.trim();
+
+			const parsed = JSON.parse(text);
+			const result = this.validateElicitation(parsed);
+			if (result) {
+				this.elicitationCache.set(repoId, result);
+				return result;
+			}
+
+			this.logger.warn("LLM returned invalid elicitation structure");
+			return DEFAULT_ELICITATION;
+		} catch (err) {
+			this.logger.warn(`LLM elicitation parsing failed: ${err}`);
+			return DEFAULT_ELICITATION;
+		}
 	}
 
 	/**
-	 * Extract hotfix and normal branch targets from rules content.
-	 *
-	 * Looks for patterns like:
-	 *   "hotfix" ... base: main, prefix: hotfix
-	 *   default ... base: develop, prefix: feature
-	 *
-	 * This is a best-effort heuristic parser. Falls back to defaults
-	 * for any field that can't be extracted.
+	 * Validate and normalize the LLM's JSON response into a ParsedElicitation.
+	 * Returns undefined if the structure is invalid.
 	 */
-	parseRulesContent(content: string): ParsedBranchTargets {
-		const lines = content.toLowerCase().split("\n");
+	private validateElicitation(parsed: unknown): ParsedElicitation | undefined {
+		if (!parsed || typeof parsed !== "object") return undefined;
+		const obj = parsed as Record<string, unknown>;
 
-		let hotfixBase = DEFAULT_HOTFIX_BASE;
-		let hotfixPrefix = DEFAULT_HOTFIX_PREFIX;
-		let normalBase = DEFAULT_NORMAL_BASE;
-		let normalPrefix = DEFAULT_NORMAL_PREFIX;
+		if (typeof obj.question !== "string" || !obj.question) return undefined;
+		if (!Array.isArray(obj.options) || obj.options.length !== 2)
+			return undefined;
 
-		for (const line of lines) {
-			// Match lines containing base/prefix patterns
-			const baseMatch = line.match(/base[:\s]+(\S+)/);
-			const prefixMatch = line.match(/prefix[:\s]+(\S+)/);
-
-			const base = baseMatch?.[1]?.replace(/[,;]/g, "");
-			const prefix = prefixMatch?.[1]?.replace(/[,;]/g, "");
-
+		const options: ParsedBranchOption[] = [];
+		for (const opt of obj.options) {
+			if (!opt || typeof opt !== "object") return undefined;
+			const o = opt as Record<string, unknown>;
 			if (
-				line.includes("hotfix") ||
-				line.includes("urgent") ||
-				line.includes("critical")
+				typeof o.label !== "string" ||
+				!o.label ||
+				typeof o.description !== "string" ||
+				!o.description ||
+				typeof o.baseBranch !== "string" ||
+				!o.baseBranch ||
+				typeof o.prefix !== "string" ||
+				!o.prefix
 			) {
-				if (base) hotfixBase = base;
-				if (prefix) hotfixPrefix = prefix;
-			} else if (
-				line.includes("default") ||
-				line.includes("feature") ||
-				line.includes("everything else")
-			) {
-				if (base) normalBase = base;
-				if (prefix) normalPrefix = prefix;
+				return undefined;
 			}
+			options.push({
+				label: o.label,
+				description: o.description,
+				baseBranch: o.baseBranch,
+				// Normalize: strip trailing slash if LLM includes one
+				prefix: o.prefix.replace(/\/$/, ""),
+			});
 		}
 
-		return { hotfixBase, hotfixPrefix, normalBase, normalPrefix };
+		return {
+			question: obj.question,
+			options: options as unknown as readonly [
+				ParsedBranchOption,
+				ParsedBranchOption,
+			],
+		};
 	}
 }

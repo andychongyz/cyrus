@@ -3730,7 +3730,7 @@ ${taskSection}`;
 		if (this.branchElicitationHandler.hasHotfixLabel(earlyLowercaseLabels)) {
 			// Hotfix label found — auto-resolve without asking (uses branching rules if available)
 			const hotfixChoice =
-				this.branchElicitationHandler.resolveAutoHotfix(primaryRepoId);
+				await this.branchElicitationHandler.resolveAutoHotfix(primaryRepoId);
 			log.info(
 				`Hotfix label detected, auto-resolving branch: ${hotfixChoice.baseBranch} with prefix ${hotfixChoice.prefix}`,
 			);

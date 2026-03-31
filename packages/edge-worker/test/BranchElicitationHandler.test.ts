@@ -1,9 +1,11 @@
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import type { IIssueTrackerService } from "cyrus-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	BranchElicitationHandler,
 	type BranchElicitationResumeContext,
+	type ParsedElicitation,
 } from "../src/BranchElicitationHandler.js";
 
 // Mock fs to control BRANCHING_RULES.md existence
@@ -19,6 +21,37 @@ vi.mock("node:fs", async () => {
 	};
 });
 
+// Mock child_process to control claude CLI output
+vi.mock("node:child_process", async () => {
+	const actual =
+		await vi.importActual<typeof import("node:child_process")>(
+			"node:child_process",
+		);
+	return {
+		...actual,
+		execFileSync: vi.fn(),
+	};
+});
+
+/** Standard LLM response matching the mocked BRANCHING_RULES.md content. */
+const STANDARD_LLM_ELICITATION: ParsedElicitation = {
+	question: "Is this issue urgent?",
+	options: [
+		{
+			label: "Hotfix — urgent, deploy to production immediately",
+			description: "Branch from `master` with `hotfix/` prefix",
+			baseBranch: "master",
+			prefix: "hotfix",
+		},
+		{
+			label: "Normal — include in next release",
+			description: "Branch from `develop` with `feature/` prefix",
+			baseBranch: "develop",
+			prefix: "feature",
+		},
+	],
+};
+
 /**
  * Unit tests for BranchElicitationHandler.
  *
@@ -26,7 +59,8 @@ vi.mock("node:fs", async () => {
  * - Detects hotfix labels to skip elicitation
  * - Posts select signal to Linear for branch choice
  * - Resolves hotfix/normal based on user response
- * - Parses BRANCHING_RULES.md for branch targets
+ * - Parses BRANCHING_RULES.md via LLM for branch targets
+ * - Falls back to defaults when LLM is unavailable
  * - Handles cancellation and error scenarios
  */
 describe("BranchElicitationHandler", () => {
@@ -44,6 +78,11 @@ describe("BranchElicitationHandler", () => {
 		...overrides,
 	});
 
+	/** Configure the mocked execFileSync to return JSON for the given elicitation. */
+	function mockClaudeOutput(elicitation: ParsedElicitation): void {
+		vi.mocked(execFileSync).mockReturnValue(JSON.stringify(elicitation));
+	}
+
 	beforeEach(() => {
 		mockCreateAgentActivity = vi.fn().mockResolvedValue({ success: true });
 		mockIssueTracker = {
@@ -55,6 +94,12 @@ describe("BranchElicitationHandler", () => {
 		handler = new BranchElicitationHandler({
 			getIssueTracker: mockGetIssueTracker,
 		});
+
+		// Reset fs mocks to default state (file exists, returns standard content)
+		vi.mocked(existsSync).mockReturnValue(true);
+
+		// Mock claude CLI to return standard elicitation JSON
+		mockClaudeOutput(STANDARD_LLM_ELICITATION);
 	});
 
 	afterEach(() => {
@@ -108,8 +153,18 @@ describe("BranchElicitationHandler", () => {
 	});
 
 	describe("resolveAutoHotfix", () => {
-		it("should return hotfix branch config with defaults when no rules file", () => {
-			const choice = handler.resolveAutoHotfix("non-existent-repo");
+		it("should return hotfix branch config from LLM", async () => {
+			const choice = await handler.resolveAutoHotfix("repo-1");
+			expect(choice).toEqual({
+				isHotfix: true,
+				baseBranch: "master",
+				prefix: "hotfix",
+			});
+		});
+
+		it("should return defaults when no rules file exists", async () => {
+			vi.mocked(existsSync).mockReturnValueOnce(false);
+			const choice = await handler.resolveAutoHotfix("non-existent-repo");
 			expect(choice).toEqual({
 				isHotfix: true,
 				baseBranch: "master",
@@ -118,70 +173,164 @@ describe("BranchElicitationHandler", () => {
 		});
 	});
 
-	describe("parseRulesContent", () => {
-		it("should parse hotfix and default rules", () => {
-			const content = `# Branching Rules
+	describe("parseElicitation", () => {
+		it("should call claude CLI and return parsed elicitation", async () => {
+			const result = await handler.parseElicitation("repo-1");
+			expect(result.question).toBe("Is this issue urgent?");
+			expect(result.options).toHaveLength(2);
+			expect(result.options[0].baseBranch).toBe("master");
+			expect(result.options[0].prefix).toBe("hotfix");
+			expect(result.options[1].baseBranch).toBe("develop");
+			expect(result.options[1].prefix).toBe("feature");
 
-- If issue has "hotfix" label: base: main, prefix: hotfix
-- Default (everything else): base: develop, prefix: feature
-`;
-			const targets = handler.parseRulesContent(content);
-			expect(targets).toEqual({
-				hotfixBase: "main",
-				hotfixPrefix: "hotfix",
-				normalBase: "develop",
-				normalPrefix: "feature",
-			});
-		});
-
-		it("should parse rules with different branch names", () => {
-			const content = `# Rules
-
-- hotfix/urgent/critical: base: master, prefix: fix
-- Default: base: staging, prefix: feat
-`;
-			const targets = handler.parseRulesContent(content);
-			expect(targets).toEqual({
-				hotfixBase: "master",
-				hotfixPrefix: "fix",
-				normalBase: "staging",
-				normalPrefix: "feat",
-			});
-		});
-
-		it("should use defaults when content is empty", () => {
-			const targets = handler.parseRulesContent("");
-			expect(targets).toEqual({
-				hotfixBase: "master",
-				hotfixPrefix: "hotfix",
-				normalBase: "develop",
-				normalPrefix: "feature",
-			});
-		});
-
-		it("should use defaults when content has no matching patterns", () => {
-			const targets = handler.parseRulesContent(
-				"This is a branching rules file with no parseable patterns.",
+			// Verify claude was called with correct flags
+			expect(execFileSync).toHaveBeenCalledWith(
+				"claude",
+				expect.arrayContaining([
+					"-p",
+					"--no-session-persistence",
+					"--output-format",
+					"text",
+					"--model",
+					"haiku",
+					"--tools",
+					"",
+				]),
+				expect.objectContaining({
+					encoding: "utf-8",
+					timeout: 30_000,
+				}),
 			);
-			expect(targets).toEqual({
-				hotfixBase: "master",
-				hotfixPrefix: "hotfix",
-				normalBase: "develop",
-				normalPrefix: "feature",
-			});
 		});
 
-		it("should handle rules with trailing commas and semicolons", () => {
-			const content = `- hotfix: base: production;, prefix: hotfix;
-- everything else: base: develop, prefix: feature;`;
-			const targets = handler.parseRulesContent(content);
-			expect(targets.hotfixBase).toBe("production");
-			expect(targets.normalBase).toBe("develop");
+		it("should cache LLM results by repoId", async () => {
+			await handler.parseElicitation("repo-1");
+			await handler.parseElicitation("repo-1");
+			// Should only call claude once
+			expect(execFileSync).toHaveBeenCalledTimes(1);
+		});
+
+		it("should return defaults when no BRANCHING_RULES.md exists", async () => {
+			vi.mocked(existsSync).mockReturnValueOnce(false);
+			const result = await handler.parseElicitation("no-rules-repo");
+			expect(result.options[0].baseBranch).toBe("master");
+			expect(result.options[1].baseBranch).toBe("develop");
+			expect(execFileSync).not.toHaveBeenCalled();
+		});
+
+		it("should return defaults when claude CLI returns invalid JSON", async () => {
+			vi.mocked(execFileSync).mockReturnValue("not valid json {{{");
+			const result = await handler.parseElicitation("repo-1");
+			expect(result.options[0].baseBranch).toBe("master");
+		});
+
+		it("should return defaults when claude CLI returns incomplete structure", async () => {
+			vi.mocked(execFileSync).mockReturnValue(
+				JSON.stringify({
+					question: "Is this urgent?",
+					options: [{ label: "Hotfix" }], // missing fields
+				}),
+			);
+			const result = await handler.parseElicitation("repo-1");
+			expect(result.options[0].baseBranch).toBe("master");
+		});
+
+		it("should handle LLM response with markdown code fences", async () => {
+			const elicitation: ParsedElicitation = {
+				question: "Is this a hotfix?",
+				options: [
+					{
+						label: "Yes, hotfix",
+						description: "Branch from `main` with `hotfix/` prefix",
+						baseBranch: "main",
+						prefix: "hotfix",
+					},
+					{
+						label: "No, normal",
+						description: "Branch from `develop` with `feat/` prefix",
+						baseBranch: "develop",
+						prefix: "feat",
+					},
+				],
+			};
+			vi.mocked(execFileSync).mockReturnValue(
+				`\`\`\`json\n${JSON.stringify(elicitation)}\n\`\`\``,
+			);
+			const result = await handler.parseElicitation("repo-1");
+			expect(result.question).toBe("Is this a hotfix?");
+			expect(result.options[0].baseBranch).toBe("main");
+			expect(result.options[1].prefix).toBe("feat");
+		});
+
+		it("should normalize trailing slash in prefix", async () => {
+			const elicitation: ParsedElicitation = {
+				question: "Urgent?",
+				options: [
+					{
+						label: "Hotfix",
+						description: "desc",
+						baseBranch: "master",
+						prefix: "hotfix/",
+					},
+					{
+						label: "Normal",
+						description: "desc",
+						baseBranch: "develop",
+						prefix: "feature/",
+					},
+				],
+			};
+			mockClaudeOutput(elicitation);
+			const result = await handler.parseElicitation("repo-new");
+			expect(result.options[0].prefix).toBe("hotfix");
+			expect(result.options[1].prefix).toBe("feature");
+		});
+
+		it("should parse git-flow style rules correctly", async () => {
+			const gitFlowElicitation: ParsedElicitation = {
+				question: "Is this issue urgent?",
+				options: [
+					{
+						label: "Hotfix — urgent, deploy to production immediately",
+						description: "Branch from `master` with `hotfix/` prefix",
+						baseBranch: "master",
+						prefix: "hotfix",
+					},
+					{
+						label: "Normal — include in next release",
+						description: "Branch from `develop` with `feature/` prefix",
+						baseBranch: "develop",
+						prefix: "feature",
+					},
+				],
+			};
+			mockClaudeOutput(gitFlowElicitation);
+			const result = await handler.parseElicitation("git-flow-repo");
+			expect(result.options[0].baseBranch).toBe("master");
+			expect(result.options[0].prefix).toBe("hotfix");
+			expect(result.options[1].baseBranch).toBe("develop");
+			expect(result.options[1].prefix).toBe("feature");
+		});
+
+		it("should return defaults when claude CLI is not available", async () => {
+			vi.mocked(execFileSync).mockImplementation(() => {
+				throw new Error("ENOENT: claude not found");
+			});
+			const result = await handler.parseElicitation("repo-1");
+			expect(result.options[0].baseBranch).toBe("master");
+		});
+
+		it("should return defaults when claude CLI times out", async () => {
+			vi.mocked(execFileSync).mockImplementation(() => {
+				throw new Error("ETIMEDOUT");
+			});
+			const result = await handler.parseElicitation("repo-1");
+			expect(result.options[0].baseBranch).toBe("master");
 		});
 	});
 
 	describe("elicitBranchChoice", () => {
-		it("should post select signal to Linear", async () => {
+		it("should post select signal to Linear with LLM-generated prompt", async () => {
 			const resumeContext = makeResumeContext();
 
 			// Start elicitation (don't await — it waits for response)
@@ -195,7 +344,7 @@ describe("BranchElicitationHandler", () => {
 			// Give it time to post the activity
 			await new Promise((resolve) => setTimeout(resolve, 10));
 
-			// Verify the elicitation was posted
+			// Verify the elicitation was posted with LLM-generated content
 			expect(mockCreateAgentActivity).toHaveBeenCalledWith({
 				agentSessionId: "session-123",
 				content: {
@@ -205,8 +354,12 @@ describe("BranchElicitationHandler", () => {
 				signal: "select",
 				signalMetadata: {
 					options: [
-						{ value: expect.stringContaining("Hotfix") },
-						{ value: expect.stringContaining("Normal") },
+						{
+							value: expect.stringContaining("Hotfix"),
+						},
+						{
+							value: expect.stringContaining("Normal"),
+						},
 					],
 				},
 			});

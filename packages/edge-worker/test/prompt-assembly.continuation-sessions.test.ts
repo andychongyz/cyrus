@@ -96,4 +96,89 @@ You can use the Read tool to view these files.
 		expect(result.metadata.components).toEqual(["user-comment"]);
 		expect(result.metadata.promptType).toBe("continuation");
 	});
+
+	it("should include base_branch context reminder when resolvedBaseBranches is provided", async () => {
+		const worker = createTestWorker([], "ceedar");
+
+		await scenario(worker)
+			.continuationSession()
+			.withRepository({
+				id: "repo-hotfix-test",
+				path: "/test/repo",
+				baseBranch: "develop",
+			})
+			.withResolvedBaseBranches({
+				"repo-hotfix-test": { branch: "master", source: "commit-ish" },
+			})
+			.withUserComment("Create the PR")
+			.withCommentAuthor("Cyrus")
+			.withCommentTimestamp("2025-01-27T14:00:00Z")
+			.expectUserPrompt(`<context_reminder>
+  <base_branch>master</base_branch>
+</context_reminder>
+
+<new_comment>
+  <author>Cyrus</author>
+  <timestamp>2025-01-27T14:00:00Z</timestamp>
+  <content>
+Create the PR
+  </content>
+</new_comment>`)
+			.expectSystemPrompt(undefined)
+			.expectPromptType("continuation")
+			.verify();
+	});
+
+	it("should fall back to repo baseBranch when resolvedBaseBranches has no entry for the repo", async () => {
+		const worker = createTestWorker([], "ceedar");
+
+		await scenario(worker)
+			.continuationSession()
+			.withRepository({
+				id: "repo-fallback-test",
+				path: "/test/repo",
+				baseBranch: "develop",
+			})
+			.withResolvedBaseBranches({
+				"some-other-repo": { branch: "master", source: "commit-ish" },
+			})
+			.withUserComment("Create the PR")
+			.withCommentAuthor("Cyrus")
+			.withCommentTimestamp("2025-01-27T14:00:00Z")
+			.expectUserPrompt(`<context_reminder>
+  <base_branch>develop</base_branch>
+</context_reminder>
+
+<new_comment>
+  <author>Cyrus</author>
+  <timestamp>2025-01-27T14:00:00Z</timestamp>
+  <content>
+Create the PR
+  </content>
+</new_comment>`)
+			.expectSystemPrompt(undefined)
+			.expectPromptType("continuation")
+			.verify();
+	});
+
+	it("should not include context_reminder when no resolvedBaseBranches provided", async () => {
+		const worker = createTestWorker([], "ceedar");
+
+		await scenario(worker)
+			.continuationSession()
+			.withUserComment("Please fix the bug")
+			.withCommentAuthor("Alice Smith")
+			.withCommentTimestamp("2025-01-27T12:00:00Z")
+			.expectUserPrompt(`<new_comment>
+  <author>Alice Smith</author>
+  <timestamp>2025-01-27T12:00:00Z</timestamp>
+  <content>
+Please fix the bug
+  </content>
+</new_comment>`)
+			.expectSystemPrompt(undefined)
+			.expectComponents("user-comment")
+			.expectPromptType("continuation")
+			.verify();
+	});
 });

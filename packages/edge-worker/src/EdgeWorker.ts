@@ -5442,6 +5442,7 @@ ${taskSection}`;
 			isNewSession,
 			isStreaming: false, // This path is only for non-streaming prompts
 			labels,
+			resolvedBaseBranches: session.workspace.resolvedBaseBranches,
 		};
 
 		// Use unified prompt assembly
@@ -5622,6 +5623,19 @@ ${input.userComment}
 			components.push("attachment-manifest");
 		}
 
+		const parts: string[] = [];
+
+		// Re-inject base branch context so subroutines (changelog-update, gh-pr)
+		// always see the correct base branch, even after context compression
+		if (input.resolvedBaseBranches) {
+			const repo = input.repository;
+			const resolution = input.resolvedBaseBranches[repo.id];
+			const baseBranch = resolution?.branch ?? repo.baseBranch;
+			parts.push(`<context_reminder>
+  <base_branch>${baseBranch}</base_branch>
+</context_reminder>`);
+		}
+
 		// Wrap comment in XML with author and timestamp for multi-player context
 		const author = input.commentAuthor || "Unknown";
 		const timestamp = input.commentTimestamp || new Date().toISOString();
@@ -5634,7 +5648,7 @@ ${input.userComment}
   </content>
 </new_comment>`;
 
-		const parts: string[] = [commentXml];
+		parts.push(commentXml);
 		if (input.attachmentManifest) {
 			parts.push(input.attachmentManifest);
 		}

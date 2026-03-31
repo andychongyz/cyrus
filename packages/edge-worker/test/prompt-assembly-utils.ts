@@ -209,6 +209,11 @@ export class PromptScenario {
 		}
 	}
 
+	withResolvedBaseBranches(resolvedBaseBranches: any) {
+		this.input.resolvedBaseBranches = resolvedBaseBranches;
+		return this;
+	}
+
 	withGuidance(guidance: any[]) {
 		this.input.guidance = guidance;
 		return this;

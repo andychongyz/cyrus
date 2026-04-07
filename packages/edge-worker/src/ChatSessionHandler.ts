@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import type { McpServerConfig, SDKMessage } from "cyrus-claude-runner";
+import type { SDKMessage } from "cyrus-claude-runner";
 import type {
 	AgentRunnerConfig,
 	AgentSessionInfo,
@@ -55,7 +55,8 @@ export interface ChatPlatformAdapter<TEvent> {
  */
 export interface ChatSessionHandlerDeps {
 	cyrusHome: string;
-	mcpConfig?: Record<string, McpServerConfig>;
+	/** Linear workspace ID for building fresh MCP config per session */
+	linearWorkspaceId?: string;
 	/** Repository to source user-configured MCP paths from (V1: first available repo) */
 	repository?: RepositoryConfig;
 	chatRepositoryPaths?: string[];
@@ -96,8 +97,6 @@ export class ChatSessionHandler<TEvent> {
 		this.sessionManager = new AgentSessionManager(
 			undefined, // No parent session lookup
 			undefined, // No resume parent session
-			undefined, // No procedure analyzer
-			undefined, // No shared application server
 		);
 	}
 
@@ -219,7 +218,7 @@ export class ChatSessionHandler<TEvent> {
 			// Track this thread → session mapping for follow-up messages
 			this.threadSessions.set(threadKey, sessionId);
 
-			// Initialize procedure metadata
+			// Initialize session metadata
 			if (!session.metadata) {
 				session.metadata = {};
 			}
@@ -405,7 +404,7 @@ export class ChatSessionHandler<TEvent> {
 			sessionId,
 			resumeSessionId,
 			cyrusHome: this.deps.cyrusHome,
-			mcpConfig: this.deps.mcpConfig,
+			linearWorkspaceId: this.deps.linearWorkspaceId,
 			repository: this.deps.repository,
 			repositoryPaths: this.deps.chatRepositoryPaths,
 			logger: sessionLogger,

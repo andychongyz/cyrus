@@ -9,6 +9,27 @@ This changelog documents internal development changes, refactors, tooling update
 - Removed `labelBranchConfig` from `RepositoryConfigSchema` (Zod + JSON schemas).
 - Dashboard: replaced `LabelBranchEditor` component with a textarea for editing `BRANCHING_RULES.md` directly. New `GET/PUT /api/repositories/:id/branching-rules` endpoints in `server.ts`. File is auto-created with default content when a repo is added.
 
+## [0.2.42] - 2026-04-06
+
+### Fixed
+- Fixed bundled skills not being included in published npm package. ([CYPACK-1046](https://linear.app/ceedar/issue/CYPACK-1046), [#1073](https://github.com/ceedaragents/cyrus/pull/1073))
+
+## [0.2.41] - 2026-04-06
+
+### Changed
+- Replaced rigid procedure-based agent session architecture with skills-based approach. Procedures (ProcedureAnalyzer, subroutine sequencing, validation loop) removed in favor of SKILL.md files delivered via Claude Agent SDK plugin (`cyrus-skills-plugin`). Added `plugins` field to `AgentRunnerConfig`, `ClaudeRunnerConfig`, and `IssueRunnerConfigInput`; wired through `ClaudeRunner` to SDK `query()` options. Added Stop hook to `RunnerConfigBuilder` with `stop_hook_active` guard to ensure PRs/summaries are created before session ends. Simplified `AgentSessionManager` by removing procedure completion routing and validation loop logic. Re-exported `SdkPluginConfig` from `claude-runner`. Removed ~7000 lines of procedure/validation/subroutine code. ([CYPACK-996](https://linear.app/ceedar/issue/CYPACK-996), [#1018](https://github.com/ceedaragents/cyrus/pull/1018))
+- Extracted `SkillsPluginResolver` from `EdgeWorker` (SRP refactor). Skills plugin resolution, user plugin manifest auto-scaffolding, and `buildSkillsGuidance()` now live in a dedicated module instead of being inline in the 5400-line EdgeWorker. Removed stale `postProcedureSelectionThought` mocks from 7 test files and updated procedure-referencing comments across source and docs. ([CYPACK-996](https://linear.app/ceedar/issue/CYPACK-996), [#1018](https://github.com/ceedaragents/cyrus/pull/1018))
+
+## [0.2.40] - 2026-04-02
+
+### Changed
+- Removed `EdgeWorker.buildMcpConfig()` private wrapper — `RunnerConfigBuilder` and `McpConfigService` now handle all MCP config assembly. Chat sessions (`ChatSessionHandler`) pass `linearWorkspaceId` instead of a pre-built `mcpConfig` object, so `RunnerConfigBuilder.buildChatConfig()` calls `mcpConfigProvider.buildMcpConfig()` fresh per session (same pattern as `buildIssueConfig`). ([CYPACK-1029](https://linear.app/ceedar/issue/CYPACK-1029), [#1063](https://github.com/ceedaragents/cyrus/pull/1063))
+
+## [0.2.39] - 2026-03-31
+
+_No internal changes._
+
+## [0.2.38] - 2026-03-25
 
 ### Added
 - Created `cyrus-gitlab-event-transport` package mirroring `cyrus-github-event-transport`: `GitLabEventTransport` (webhook endpoint with proxy/signature verification), `GitLabCommentService` (post MR notes, discussion replies, award emoji), `GitLabMessageTranslator` (translate GitLab events to `InternalMessage`), and `gitlab-webhook-utils` (payload extractors). ([#857](https://github.com/ceedaragents/cyrus/issues/857), [#1029](https://github.com/ceedaragents/cyrus/pull/1029))

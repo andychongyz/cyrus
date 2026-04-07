@@ -8,6 +8,11 @@ import {
 	handleRepository,
 	handleRepositoryDelete,
 } from "./handlers/repository.js";
+import {
+	handleDeleteSkill,
+	handleListSkills,
+	handleUpdateSkill,
+} from "./handlers/skills.js";
 import { handleTestMcp } from "./handlers/testMcp.js";
 import type {
 	ApiResponse,
@@ -17,8 +22,11 @@ import type {
 	CyrusConfigPayload,
 	CyrusEnvPayload,
 	DeleteRepositoryPayload,
+	DeleteSkillPayload,
+	ListSkillsPayload,
 	RepositoryPayload,
 	TestMcpPayload,
+	UpdateSkillPayload,
 } from "./types.js";
 
 // Minimal interface so config-updater doesn't depend on edge-worker package
@@ -73,13 +81,16 @@ export class ConfigUpdater {
 		this.registerRoute("/api/check-gh", this.handleCheckGhRoute);
 
 		// Dashboard read endpoints
-		this.registerGetRoute("/api/config", this.handleGetConfigRoute);
-		this.registerGetRoute("/api/sessions", this.handleGetSessionsRoute);
+		this.registerGetRouteRaw("/api/config", this.handleGetConfigRoute);
+		this.registerGetRouteRaw("/api/sessions", this.handleGetSessionsRoute);
 		this.registerSseRoute(
 			"/api/sessions/stream",
 			this.handleSessionsStreamRoute,
 		);
 		this.registerRoute("/api/check-glab", this.handleCheckGlabRoute);
+		this.registerRoute("/api/update/skill", this.handleUpdateSkillRoute);
+		this.registerDeleteRoute("/api/update/skill", this.handleDeleteSkillRoute);
+		this.registerGetRoute("/api/skills", this.handleListSkillsRoute);
 	}
 
 	/**
@@ -132,6 +143,37 @@ export class ConfigUpdater {
 
 			try {
 				const response = await handler.call(this, request.body);
+				const statusCode = response.success ? 200 : 400;
+				return reply.status(statusCode).send(response);
+			} catch (error) {
+				return reply.status(500).send({
+					success: false,
+					error: "Internal server error",
+					details: error instanceof Error ? error.message : String(error),
+				});
+			}
+		});
+	}
+
+	/**
+	 * Register a GET route with authentication
+	 */
+	private registerGetRoute(
+		path: string,
+		handler: (payload: any) => Promise<ApiResponse>,
+	): void {
+		this.fastify.get(path, async (request, reply) => {
+			// Verify authentication
+			const authHeader = request.headers.authorization;
+			if (!this.verifyAuth(authHeader)) {
+				return reply.status(401).send({
+					success: false,
+					error: "Unauthorized",
+				});
+			}
+
+			try {
+				const response = await handler.call(this, request.query || {});
 				const statusCode = response.success ? 200 : 400;
 				return reply.status(statusCode).send(response);
 			} catch (error) {
@@ -243,9 +285,9 @@ export class ConfigUpdater {
 	}
 
 	/**
-	 * Register a GET route with Bearer token authentication
+	 * Register a GET route passing the full request object to the handler
 	 */
-	private registerGetRoute(
+	private registerGetRouteRaw(
 		path: string,
 		handler: (request: FastifyRequest) => Promise<unknown>,
 	): void {
@@ -374,5 +416,32 @@ export class ConfigUpdater {
 			this.sessionRegistry?.off("sessionUpdated", onUpdated);
 			this.sessionRegistry?.off("sessionCompleted", onCompleted);
 		};
+	}
+
+	/**
+	 * Handle creating or updating a user skill
+	 */
+	private async handleUpdateSkillRoute(
+		payload: UpdateSkillPayload,
+	): Promise<ApiResponse> {
+		return handleUpdateSkill(payload, this.cyrusHome);
+	}
+
+	/**
+	 * Handle deleting a user skill
+	 */
+	private async handleDeleteSkillRoute(
+		payload: DeleteSkillPayload,
+	): Promise<ApiResponse> {
+		return handleDeleteSkill(payload, this.cyrusHome);
+	}
+
+	/**
+	 * Handle listing user skills
+	 */
+	private async handleListSkillsRoute(
+		payload: ListSkillsPayload,
+	): Promise<ApiResponse> {
+		return handleListSkills(payload, this.cyrusHome);
 	}
 }

@@ -3358,6 +3358,7 @@ ${taskSection}`;
 		linearWorkspaceId: string,
 		baseBranchOverrides?: Map<string, string>,
 		routingMethod?: string,
+		branchPrefixOverrides?: Map<string, string>,
 	): Promise<AgentSessionData> {
 		const repositories = Array.isArray(repositoriesOrSingle)
 			? repositoriesOrSingle
@@ -3387,9 +3388,11 @@ ${taskSection}`;
 		const workspace = this.config.handlers?.createWorkspace
 			? await this.config.handlers.createWorkspace(fullIssue, repositories, {
 					baseBranchOverrides,
+					branchPrefixOverrides,
 				})
 			: await this.gitService.createGitWorktree(fullIssue, repositories, {
 					baseBranchOverrides,
+					branchPrefixOverrides,
 				});
 
 		this.logger.debug(`Workspace created at: ${workspace.path}`);
@@ -3727,6 +3730,8 @@ ${taskSection}`;
 		const earlyLowercaseLabels = earlyLabels.map((l) => l.toLowerCase());
 		const primaryRepoId = primaryRepo.id;
 
+		let branchPrefixOverrides: Map<string, string> | undefined;
+
 		if (this.branchElicitationHandler.hasHotfixLabel(earlyLowercaseLabels)) {
 			// Hotfix label found — auto-resolve without asking (uses branching rules if available)
 			const hotfixChoice =
@@ -3734,21 +3739,27 @@ ${taskSection}`;
 			log.info(
 				`Hotfix label detected, auto-resolving branch: ${hotfixChoice.baseBranch} with prefix ${hotfixChoice.prefix}`,
 			);
-			baseBranchOverrides = this.applyBranchElicitationChoice(
+			const elicitResult = this.applyBranchElicitationChoice(
 				hotfixChoice,
 				repositories,
 				baseBranchOverrides,
+				branchPrefixOverrides,
 			);
+			baseBranchOverrides = elicitResult.baseBranchOverrides;
+			branchPrefixOverrides = elicitResult.branchPrefixOverrides;
 		} else if (branchElicitationChoice) {
 			// Branch elicitation choice was provided (from webhook response)
 			log.info(
 				`Using elicited branch choice: ${branchElicitationChoice.baseBranch} with prefix ${branchElicitationChoice.prefix}`,
 			);
-			baseBranchOverrides = this.applyBranchElicitationChoice(
+			const elicitResult = this.applyBranchElicitationChoice(
 				branchElicitationChoice,
 				repositories,
 				baseBranchOverrides,
+				branchPrefixOverrides,
 			);
+			baseBranchOverrides = elicitResult.baseBranchOverrides;
+			branchPrefixOverrides = elicitResult.branchPrefixOverrides;
 		} else if (
 			this.branchElicitationHandler.shouldElicit(
 				earlyLowercaseLabels,
@@ -3787,6 +3798,7 @@ ${taskSection}`;
 			linearWorkspaceId,
 			baseBranchOverrides,
 			routingMethod,
+			branchPrefixOverrides,
 		);
 
 		// Destructure the session data (excluding allowedTools which we'll build with promptType)
@@ -4773,16 +4785,24 @@ ${taskSection}`;
 	private applyBranchElicitationChoice(
 		choice: BranchElicitationChoice,
 		repositories: readonly RepositoryConfig[],
-		existingOverrides?: Map<string, string>,
-	): Map<string, string> {
-		const overrides = new Map(existingOverrides ?? []);
+		existingBaseBranchOverrides?: Map<string, string>,
+		existingPrefixOverrides?: Map<string, string>,
+	): {
+		baseBranchOverrides: Map<string, string>;
+		branchPrefixOverrides: Map<string, string>;
+	} {
+		const baseBranchOverrides = new Map(existingBaseBranchOverrides ?? []);
+		const branchPrefixOverrides = new Map(existingPrefixOverrides ?? []);
 		for (const repo of repositories) {
 			// Only set if no existing override (e.g. from [repo=name#branch] syntax)
-			if (!overrides.has(repo.id)) {
-				overrides.set(repo.id, choice.baseBranch);
+			if (!baseBranchOverrides.has(repo.id)) {
+				baseBranchOverrides.set(repo.id, choice.baseBranch);
+			}
+			if (!branchPrefixOverrides.has(repo.id)) {
+				branchPrefixOverrides.set(repo.id, choice.prefix);
 			}
 		}
-		return overrides;
+		return { baseBranchOverrides, branchPrefixOverrides };
 	}
 
 	/**

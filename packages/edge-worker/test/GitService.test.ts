@@ -1155,4 +1155,96 @@ describe("GitService", () => {
 			expect(result).toHaveLength(0);
 		});
 	});
+
+	describe("createGitWorktree - branchPrefixOverrides", () => {
+		it("uses explicit prefix override instead of LLM-resolved prefix", async () => {
+			const issue = makeIssue();
+			const repository = makeRepository();
+
+			const worktreeAddCalls: string[] = [];
+
+			mockExecSync.mockImplementation((cmd: any) => {
+				const cmdStr = String(cmd);
+				if (cmdStr === "git rev-parse --git-dir") {
+					return Buffer.from(".git\n");
+				}
+				if (cmdStr === "git worktree list --porcelain") {
+					return "";
+				}
+				if (cmdStr.includes("git rev-parse --verify")) {
+					// Branch does not exist yet
+					throw new Error("not found");
+				}
+				if (cmdStr.includes("git fetch origin")) {
+					return Buffer.from("");
+				}
+				if (cmdStr.includes("git ls-remote")) {
+					return Buffer.from("abc123\trefs/heads/main\n");
+				}
+				if (cmdStr.includes("git worktree add")) {
+					worktreeAddCalls.push(cmdStr);
+					return Buffer.from("");
+				}
+				return Buffer.from("");
+			});
+
+			mockExistsSync.mockReturnValue(false);
+
+			const prefixOverrides = new Map([["repo-1", "hotfix"]]);
+
+			await gitService.createGitWorktree(issue, [repository], {
+				branchPrefixOverrides: prefixOverrides,
+			});
+
+			// The worktree add command should use the hotfix/ prefix
+			expect(worktreeAddCalls.length).toBeGreaterThan(0);
+			const addCmd = worktreeAddCalls[0]!;
+			expect(addCmd).toContain("hotfix/cyrustester/eng-97-fix-shader");
+		});
+
+		it("normalizes prefix without trailing slash", async () => {
+			const issue = makeIssue();
+			const repository = makeRepository();
+
+			const worktreeAddCalls: string[] = [];
+
+			mockExecSync.mockImplementation((cmd: any) => {
+				const cmdStr = String(cmd);
+				if (cmdStr === "git rev-parse --git-dir") {
+					return Buffer.from(".git\n");
+				}
+				if (cmdStr === "git worktree list --porcelain") {
+					return "";
+				}
+				if (cmdStr.includes("git rev-parse --verify")) {
+					throw new Error("not found");
+				}
+				if (cmdStr.includes("git fetch origin")) {
+					return Buffer.from("");
+				}
+				if (cmdStr.includes("git ls-remote")) {
+					return Buffer.from("abc123\trefs/heads/main\n");
+				}
+				if (cmdStr.includes("git worktree add")) {
+					worktreeAddCalls.push(cmdStr);
+					return Buffer.from("");
+				}
+				return Buffer.from("");
+			});
+
+			mockExistsSync.mockReturnValue(false);
+
+			// Prefix already has trailing slash — should not double-slash
+			const prefixOverrides = new Map([["repo-1", "hotfix/"]]);
+
+			await gitService.createGitWorktree(issue, [repository], {
+				branchPrefixOverrides: prefixOverrides,
+			});
+
+			expect(worktreeAddCalls.length).toBeGreaterThan(0);
+			const addCmd = worktreeAddCalls[0]!;
+			expect(addCmd).toContain("hotfix/cyrustester/eng-97-fix-shader");
+			expect(addCmd).not.toContain("hotfix//");
+		});
+	});
 });

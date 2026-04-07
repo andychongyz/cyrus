@@ -32,6 +32,12 @@ export interface CreateGitWorktreeOptions {
 	 * Takes highest priority over graphite, parent, and default base branches.
 	 */
 	baseBranchOverrides?: Map<string, string>;
+	/**
+	 * Per-repo branch prefix overrides from hotfix elicitation.
+	 * Takes highest priority over LLM-resolved branch rules prefix.
+	 * Values may or may not include a trailing slash — normalised internally.
+	 */
+	branchPrefixOverrides?: Map<string, string>;
 }
 
 export interface GitServiceOptions {
@@ -473,6 +479,7 @@ export class GitService {
 			globalSetupScript,
 			workspaceBaseDir: overrideBaseDir,
 			baseBranchOverrides,
+			branchPrefixOverrides,
 		} = options ?? {};
 
 		if (repositories.length === 0) {
@@ -518,6 +525,7 @@ export class GitService {
 				globalSetupScript,
 				undefined,
 				overrideValue,
+				branchPrefixOverrides?.get(repoId),
 			);
 		}
 
@@ -550,6 +558,7 @@ export class GitService {
 					undefined, // global setup already ran
 					repoSubPath, // override workspace path for N-repo layout
 					baseBranchOverrides?.get(repository.id),
+					branchPrefixOverrides?.get(repository.id),
 				);
 				repoPaths[repository.id] = repoWorkspace.path;
 				if (repoWorkspace.resolvedBaseBranches) {
@@ -589,6 +598,7 @@ export class GitService {
 		globalSetupScript?: string,
 		workspacePathOverride?: string,
 		baseBranchOverride?: string,
+		branchPrefixOverride?: string,
 	): Promise<Workspace> {
 		this.logger.info(
 			`createSingleRepoWorktree for ${repository.name} (id=${repository.id}): baseBranchOverride=${baseBranchOverride ?? "undefined"}`,
@@ -649,8 +659,15 @@ export class GitService {
 					.replace(/\s+/g, "-")
 					.substring(0, 30)}`;
 			const sanitized = this.sanitizeBranchName(rawBranchName);
-			const branchName = branchRule?.prefix
-				? `${branchRule.prefix}${sanitized}`
+			// Explicit elicitation override takes priority over LLM-resolved prefix.
+			// Normalize: ensure prefix ends with "/" for consistent branch naming.
+			const resolvedPrefix = branchPrefixOverride ?? branchRule?.prefix;
+			const effectivePrefix =
+				resolvedPrefix && !resolvedPrefix.endsWith("/")
+					? `${resolvedPrefix}/`
+					: resolvedPrefix;
+			const branchName = effectivePrefix
+				? `${effectivePrefix}${sanitized}`
 				: sanitized;
 			const workspacePath =
 				workspacePathOverride ??

@@ -35,6 +35,8 @@ import { AgentActivitySignal, createLogger } from "cyrus-core";
 export interface BranchElicitationChoice {
 	/** Whether the user chose hotfix */
 	readonly isHotfix: boolean;
+	/** Whether the user chose question/research (no code changes, just investigate) */
+	readonly isQuestion: boolean;
 	/** Resolved base branch */
 	readonly baseBranch: string;
 	/** Resolved branch prefix */
@@ -57,7 +59,7 @@ export interface ParsedBranchOption {
 export interface ParsedElicitation {
 	/** Question to ask the user (e.g. "Is this issue urgent?") */
 	readonly question: string;
-	/** Exactly two options: [0] = hotfix/urgent, [1] = normal/default */
+	/** Branch options: [0] = hotfix/urgent, [1] = normal/default (from BRANCHING_RULES.md) */
 	readonly options: readonly [ParsedBranchOption, ParsedBranchOption];
 }
 
@@ -91,6 +93,16 @@ export interface BranchElicitationHandlerDeps {
 // ── Constants ───────────────────────────────────────────────────────
 
 const HOTFIX_LABELS = ["hotfix", "urgent", "critical", "production"];
+
+/** Hardcoded "Question" option appended to every elicitation. Not parsed from BRANCHING_RULES.md. */
+const QUESTION_OPTION: ParsedBranchOption = {
+	label: "Question — research the codebase and answer",
+	description: "No code changes, just investigate and respond",
+	baseBranch: "",
+	prefix: "",
+};
+
+const QUESTION_KEYWORDS = ["question", "research", "investigate"];
 
 /** Default elicitation used when no BRANCHING_RULES.md exists or LLM parsing fails. */
 const DEFAULT_ELICITATION: ParsedElicitation = {
@@ -196,6 +208,7 @@ export class BranchElicitationHandler {
 		const hotfix = elicitation.options[0];
 		return {
 			isHotfix: true,
+			isQuestion: false,
 			baseBranch: hotfix.baseBranch,
 			prefix: hotfix.prefix,
 		};
@@ -222,6 +235,7 @@ export class BranchElicitationHandler {
 			const normal = elicitation.options[1];
 			return {
 				isHotfix: false,
+				isQuestion: false,
 				baseBranch: normal.baseBranch,
 				prefix: normal.prefix,
 			};
@@ -241,10 +255,11 @@ export class BranchElicitationHandler {
 		const elicitation = await this.parseElicitation(repoId);
 		const [hotfixOption, normalOption] = elicitation.options;
 
-		// Post the select signal to Linear
+		// Post the select signal to Linear (branch options + hardcoded question option)
 		const options = [
 			{ value: hotfixOption.label },
 			{ value: normalOption.label },
+			{ value: QUESTION_OPTION.label },
 		];
 
 		const body = [
@@ -252,6 +267,7 @@ export class BranchElicitationHandler {
 			"",
 			`• **${hotfixOption.label}**: ${hotfixOption.description}`,
 			`• **${normalOption.label}**: ${normalOption.description}`,
+			`• **${QUESTION_OPTION.label}**: ${QUESTION_OPTION.description}`,
 		].join("\n");
 
 		try {
@@ -273,6 +289,7 @@ export class BranchElicitationHandler {
 			this.logger.error(`Failed to post branch elicitation: ${errorMessage}`);
 			return {
 				isHotfix: false,
+				isQuestion: false,
 				baseBranch: normalOption.baseBranch,
 				prefix: normalOption.prefix,
 			};
@@ -316,19 +333,26 @@ export class BranchElicitationHandler {
 
 		const [hotfixOption, normalOption] = pending.elicitation.options;
 
-		// Match the selected value against the hotfix option label or common keywords
+		// Match the selected value — check question first, then hotfix, then default to normal
 		const lowerSelected = selectedValue.toLowerCase();
+
+		const isQuestion =
+			lowerSelected.includes(QUESTION_OPTION.label.toLowerCase()) ||
+			QUESTION_KEYWORDS.some((kw) => lowerSelected.includes(kw));
+
 		const isHotfix =
-			lowerSelected.includes(hotfixOption.label.toLowerCase()) ||
-			lowerSelected.includes("hotfix") ||
-			lowerSelected.includes("urgent") ||
-			lowerSelected.includes("production");
+			!isQuestion &&
+			(lowerSelected.includes(hotfixOption.label.toLowerCase()) ||
+				lowerSelected.includes("hotfix") ||
+				lowerSelected.includes("urgent") ||
+				lowerSelected.includes("production"));
 
 		const chosen = isHotfix ? hotfixOption : normalOption;
 		const choice: BranchElicitationChoice = {
 			isHotfix,
-			baseBranch: chosen.baseBranch,
-			prefix: chosen.prefix,
+			isQuestion,
+			baseBranch: isQuestion ? normalOption.baseBranch : chosen.baseBranch,
+			prefix: isQuestion ? normalOption.prefix : chosen.prefix,
 		};
 
 		const { resumeContext } = pending;
@@ -359,6 +383,7 @@ export class BranchElicitationHandler {
 			const normalOption = pending.elicitation.options[1];
 			pending.resolve({
 				isHotfix: false,
+				isQuestion: false,
 				baseBranch: normalOption.baseBranch,
 				prefix: normalOption.prefix,
 			});

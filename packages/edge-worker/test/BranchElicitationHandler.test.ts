@@ -157,6 +157,7 @@ describe("BranchElicitationHandler", () => {
 			const choice = await handler.resolveAutoHotfix("repo-1");
 			expect(choice).toEqual({
 				isHotfix: true,
+				isQuestion: false,
 				baseBranch: "master",
 				prefix: "hotfix",
 			});
@@ -167,6 +168,7 @@ describe("BranchElicitationHandler", () => {
 			const choice = await handler.resolveAutoHotfix("non-existent-repo");
 			expect(choice).toEqual({
 				isHotfix: true,
+				isQuestion: false,
 				baseBranch: "master",
 				prefix: "hotfix",
 			});
@@ -360,6 +362,9 @@ describe("BranchElicitationHandler", () => {
 						{
 							value: expect.stringContaining("Normal"),
 						},
+						{
+							value: expect.stringContaining("Question"),
+						},
 					],
 				},
 			});
@@ -386,6 +391,7 @@ describe("BranchElicitationHandler", () => {
 
 			expect(choice).toEqual({
 				isHotfix: false,
+				isQuestion: false,
 				baseBranch: "develop",
 				prefix: "feature",
 			});
@@ -403,6 +409,7 @@ describe("BranchElicitationHandler", () => {
 
 			expect(choice).toEqual({
 				isHotfix: false,
+				isQuestion: false,
 				baseBranch: "develop",
 				prefix: "feature",
 			});
@@ -456,12 +463,14 @@ describe("BranchElicitationHandler", () => {
 
 			expect(result).toBeDefined();
 			expect(result!.choice.isHotfix).toBe(true);
+			expect(result!.choice.isQuestion).toBe(false);
 			expect(result!.choice.baseBranch).toBe("master");
 			expect(result!.choice.prefix).toBe("hotfix");
 			expect(result!.resumeContext).toBe(resumeContext);
 
 			const choice = await choicePromise;
 			expect(choice.isHotfix).toBe(true);
+			expect(choice.isQuestion).toBe(false);
 		});
 
 		it("should resolve normal when user selects normal option", async () => {
@@ -483,11 +492,13 @@ describe("BranchElicitationHandler", () => {
 
 			expect(result).toBeDefined();
 			expect(result!.choice.isHotfix).toBe(false);
+			expect(result!.choice.isQuestion).toBe(false);
 			expect(result!.choice.baseBranch).toBe("develop");
 			expect(result!.choice.prefix).toBe("feature");
 
 			const choice = await choicePromise;
 			expect(choice.isHotfix).toBe(false);
+			expect(choice.isQuestion).toBe(false);
 		});
 
 		it("should resolve hotfix when user types free-form text with hotfix keywords", async () => {
@@ -536,6 +547,132 @@ describe("BranchElicitationHandler", () => {
 			await choicePromise;
 		});
 
+		it("should resolve question when user selects question option", async () => {
+			const resumeContext = makeResumeContext();
+
+			const choicePromise = handler.elicitBranchChoice(
+				"session-123",
+				"ws-123",
+				"repo-1",
+				resumeContext,
+			);
+
+			await new Promise((resolve) => setTimeout(resolve, 10));
+
+			const result = handler.handleUserResponse(
+				"session-123",
+				"Question — research the codebase and answer",
+			);
+
+			expect(result).toBeDefined();
+			expect(result!.choice.isQuestion).toBe(true);
+			expect(result!.choice.isHotfix).toBe(false);
+			// Question uses normal branch config
+			expect(result!.choice.baseBranch).toBe("develop");
+			expect(result!.choice.prefix).toBe("feature");
+
+			const choice = await choicePromise;
+			expect(choice.isQuestion).toBe(true);
+			expect(choice.isHotfix).toBe(false);
+		});
+
+		it("should resolve question when user types free-form text with question keywords", async () => {
+			const resumeContext = makeResumeContext();
+
+			const choicePromise = handler.elicitBranchChoice(
+				"session-123",
+				"ws-123",
+				"repo-1",
+				resumeContext,
+			);
+
+			await new Promise((resolve) => setTimeout(resolve, 10));
+
+			const result = handler.handleUserResponse(
+				"session-123",
+				"This is just a question about the codebase",
+			);
+
+			expect(result).toBeDefined();
+			expect(result!.choice.isQuestion).toBe(true);
+			expect(result!.choice.isHotfix).toBe(false);
+
+			await choicePromise;
+		});
+
+		it("should resolve question for 'research' keyword", async () => {
+			const resumeContext = makeResumeContext();
+
+			const choicePromise = handler.elicitBranchChoice(
+				"session-123",
+				"ws-123",
+				"repo-1",
+				resumeContext,
+			);
+
+			await new Promise((resolve) => setTimeout(resolve, 10));
+
+			const result = handler.handleUserResponse(
+				"session-123",
+				"I need to research how the auth system works",
+			);
+
+			expect(result).toBeDefined();
+			expect(result!.choice.isQuestion).toBe(true);
+			expect(result!.choice.isHotfix).toBe(false);
+
+			await choicePromise;
+		});
+
+		it("should resolve question for 'investigate' keyword", async () => {
+			const resumeContext = makeResumeContext();
+
+			const choicePromise = handler.elicitBranchChoice(
+				"session-123",
+				"ws-123",
+				"repo-1",
+				resumeContext,
+			);
+
+			await new Promise((resolve) => setTimeout(resolve, 10));
+
+			const result = handler.handleUserResponse(
+				"session-123",
+				"Please investigate this issue",
+			);
+
+			expect(result).toBeDefined();
+			expect(result!.choice.isQuestion).toBe(true);
+			expect(result!.choice.isHotfix).toBe(false);
+
+			await choicePromise;
+		});
+
+		it("should prioritize question over hotfix when both keywords present", async () => {
+			const resumeContext = makeResumeContext();
+
+			const choicePromise = handler.elicitBranchChoice(
+				"session-123",
+				"ws-123",
+				"repo-1",
+				resumeContext,
+			);
+
+			await new Promise((resolve) => setTimeout(resolve, 10));
+
+			const result = handler.handleUserResponse(
+				"session-123",
+				"I have a question about the urgent production issue",
+			);
+
+			expect(result).toBeDefined();
+			// Question takes priority over hotfix keywords
+			expect(result!.choice.isQuestion).toBe(true);
+			expect(result!.choice.isHotfix).toBe(false);
+
+			await choicePromise;
+		});
+
 		it("should return undefined for unknown session", () => {
 			const result = handler.handleUserResponse("unknown-session", "Hotfix");
 			expect(result).toBeUndefined();
@@ -559,6 +696,7 @@ describe("BranchElicitationHandler", () => {
 
 			const choice = await choicePromise;
 			expect(choice.isHotfix).toBe(false);
+			expect(choice.isQuestion).toBe(false);
 			expect(choice.baseBranch).toBe("develop");
 			expect(choice.prefix).toBe("feature");
 

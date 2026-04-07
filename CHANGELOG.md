@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 ### Added
 - **LLM-based branching rules** - Cyrus now determines the base branch and branch name prefix for each issue by reading a plain-English `BRANCHING_RULES.md` file. The file is auto-created at `~/.cyrus/branching_rules/<repo-id>/BRANCHING_RULES.md` when a repository is added, and can be edited directly in the dashboard. This replaces the previous label-based JSON config and supports matching on issue title, description, and labels.
 
+### Fixed
+- **Branch prefix from hotfix elicitation now applied correctly** - When users chose "Hotfix" during branch elicitation, the branch was created with a `feature/` prefix instead of `hotfix/`. The user's explicit prefix choice is now propagated through to GitService and takes priority over the LLM-resolved prefix.
+
 ### Removed
 - **`labelBranchConfig`** - Removed from repository config. Replaced by LLM-based `BRANCHING_RULES.md`. Existing `labelBranchConfig` entries in `~/.cyrus/config.json` will be ignored.
 ### Changed

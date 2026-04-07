@@ -3648,6 +3648,7 @@ ${taskSection}`;
 				isStreaming: false, // Not yet streaming
 				isMentionTriggered: isMentionTriggered || false,
 				isLabelBasedPromptRequested: isLabelBasedPromptRequested || false,
+				isQuestion: branchElicitationChoice?.isQuestion || false,
 				resolvedBaseBranches: sessionData.workspace.resolvedBaseBranches,
 				linearWorkspaceId,
 			};
@@ -3989,9 +3990,14 @@ ${taskSection}`;
 
 		const { choice, resumeContext } = result;
 
+		const choiceType = choice.isQuestion
+			? "question"
+			: choice.isHotfix
+				? "hotfix"
+				: "normal";
 		this.logger.info(
 			`Branch elicitation resolved for session ${agentSessionId}: ` +
-				`${choice.isHotfix ? "hotfix" : "normal"} → ${choice.baseBranch} with ${choice.prefix}/ prefix`,
+				`${choiceType} → ${choice.baseBranch} with ${choice.prefix}/ prefix`,
 		);
 
 		// Resume session creation with the chosen branch
@@ -5198,6 +5204,16 @@ ${taskSection}`;
 
 		// 3. Append skills guidance — instruct the agent to use skills based on context
 		systemPrompt += await this.skillsPluginResolver.buildSkillsGuidance();
+
+		// 3.5. If the user explicitly classified this as a question, force investigate skill
+		if (input.isQuestion) {
+			systemPrompt +=
+				"\n\n## Question Mode\n\n" +
+				"IMPORTANT: The user explicitly classified this issue as a question/research request.\n" +
+				"Use the `investigate` skill to search the codebase and provide a thorough answer, then use `summarize`.\n" +
+				"Do NOT make code changes. Do NOT use the `implementation` or `verify-and-ship` skills.\n" +
+				"Do NOT create branches or pull requests. Focus entirely on researching and answering the question.";
+		}
 
 		// 4. Append agent context — dynamic values for skills to reference
 		systemPrompt += this.buildAgentContextBlock();

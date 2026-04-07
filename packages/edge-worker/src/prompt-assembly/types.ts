@@ -110,6 +110,9 @@ export interface PromptAssemblyInput {
 	/** Agent session data (for mention-triggered prompts) */
 	agentSession?: WebhookAgentSession;
 
+	/** Whether the user explicitly classified this as a question/research request */
+	isQuestion?: boolean;
+
 	/** Labels on the issue (for system prompt determination) */
 	labels?: string[];
 

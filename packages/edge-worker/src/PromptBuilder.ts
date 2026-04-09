@@ -460,17 +460,29 @@ export class PromptBuilder {
 
 			// Build the git context section: single-repo uses <git_context>,
 			// multi-repo uses <repositories> with per-repo sections.
+			// Includes hotfix annotation when the base branch was chosen via hotfix elicitation.
 			let gitContext: string;
 			if (repositories.length > 1) {
 				const repoSections = repositories
 					.map((repo) => {
 						const repoBranch = baseBranchMap.get(repo.id) ?? repo.baseBranch;
-						return `  <repository name="${repo.name}">\n    <base_branch>${repoBranch}</base_branch>\n  </repository>`;
+						const isHotfix =
+							resolvedBaseBranches?.[repo.id]?.source === "hotfix-elicitation";
+						const hotfixNote = isHotfix
+							? `\n    <branch_type>hotfix</branch_type>\n    <branch_note>This is a hotfix branch. The base branch "${repoBranch}" was explicitly chosen for hotfix deployment. All PRs MUST target "${repoBranch}".</branch_note>`
+							: "";
+						return `  <repository name="${repo.name}">\n    <base_branch>${repoBranch}</base_branch>${hotfixNote}\n  </repository>`;
 					})
 					.join("\n");
 				gitContext = `<repositories>\n${repoSections}\n</repositories>`;
 			} else {
-				gitContext = `<git_context>\n<repository>${repository.name}</repository>\n<base_branch>${baseBranch}</base_branch>\n</git_context>`;
+				const isHotfix =
+					resolvedBaseBranches?.[repository.id]?.source ===
+					"hotfix-elicitation";
+				const hotfixNote = isHotfix
+					? `\n<branch_type>hotfix</branch_type>\n<branch_note>This is a hotfix branch. The base branch "${baseBranch}" was explicitly chosen for hotfix deployment. All PRs MUST target "${baseBranch}" — do NOT use the repository default branch.</branch_note>`
+					: "";
+				gitContext = `<git_context>\n<repository>${repository.name}</repository>\n<base_branch>${baseBranch}</base_branch>${hotfixNote}\n</git_context>`;
 			}
 
 			// Build the prompt with template variable substitution
@@ -946,6 +958,16 @@ IMPORTANT: Focus specifically on addressing the new comment above. This is a new
 			} else {
 				// Remove the new comment section entirely (including preceding newlines)
 				prompt = prompt.replace(/\n*{{#if new_comment}}[\s\S]*?{{\/if}}/g, "");
+			}
+
+			// Append hotfix annotation if the base branch was chosen via hotfix elicitation
+			{
+				const isHotfix =
+					resolvedBaseBranches?.[repository.id]?.source ===
+					"hotfix-elicitation";
+				if (isHotfix) {
+					prompt += `\n\n<hotfix_context>\nThis is a HOTFIX branch. The base branch "${baseBranch}" was explicitly chosen for hotfix deployment.\nAll PRs and merge requests MUST target "${baseBranch}" — do NOT use any other branch as the PR base.\n</hotfix_context>`;
+				}
 			}
 
 			// Append agent guidance if present

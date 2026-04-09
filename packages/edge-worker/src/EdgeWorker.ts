@@ -3246,13 +3246,15 @@ ${taskSection}`;
 				const branch = resolution?.branch ?? repo.baseBranch;
 				const sourceLabel = !resolution
 					? "default"
-					: resolution.source === "commit-ish"
-						? "override"
-						: resolution.source === "graphite-blocked-by"
-							? (resolution.detail ?? "graphite")
-							: resolution.source === "parent-issue"
-								? (resolution.detail ?? "parent")
-								: "default";
+					: resolution.source === "hotfix-elicitation"
+						? "hotfix"
+						: resolution.source === "commit-ish"
+							? "override"
+							: resolution.source === "graphite-blocked-by"
+								? (resolution.detail ?? "graphite")
+								: resolution.source === "parent-issue"
+									? (resolution.detail ?? "parent")
+									: "default";
 				return `- **${repo.name}** → \`${branch}\` (${sourceLabel})`;
 			});
 			await this.postRoutingActivity(
@@ -3545,6 +3547,7 @@ ${taskSection}`;
 		const primaryRepoId = primaryRepo.id;
 
 		let branchPrefixOverrides: Map<string, string> | undefined;
+		let isHotfixBranch = false;
 
 		if (this.branchElicitationHandler.hasHotfixLabel(earlyLowercaseLabels)) {
 			// Hotfix label found — auto-resolve without asking (uses branching rules if available)
@@ -3561,6 +3564,7 @@ ${taskSection}`;
 			);
 			baseBranchOverrides = elicitResult.baseBranchOverrides;
 			branchPrefixOverrides = elicitResult.branchPrefixOverrides;
+			isHotfixBranch = true;
 		} else if (branchElicitationChoice) {
 			// Branch elicitation choice was provided (from webhook response)
 			log.info(
@@ -3574,6 +3578,7 @@ ${taskSection}`;
 			);
 			baseBranchOverrides = elicitResult.baseBranchOverrides;
 			branchPrefixOverrides = elicitResult.branchPrefixOverrides;
+			isHotfixBranch = branchElicitationChoice.isHotfix;
 		} else if (
 			this.branchElicitationHandler.shouldElicit(
 				earlyLowercaseLabels,
@@ -3614,6 +3619,16 @@ ${taskSection}`;
 			routingMethod,
 			branchPrefixOverrides,
 		);
+
+		// Tag resolved base branches with hotfix source for downstream prompt enrichment
+		if (isHotfixBranch && sessionData.workspace.resolvedBaseBranches) {
+			for (const resolution of Object.values(
+				sessionData.workspace.resolvedBaseBranches,
+			)) {
+				resolution.source = "hotfix-elicitation";
+				resolution.detail = "User selected hotfix in branch elicitation";
+			}
+		}
 
 		// Destructure the session data (excluding allowedTools which we'll build with promptType)
 		const {
@@ -5327,8 +5342,12 @@ ${input.userComment}
 			const repo = input.repository;
 			const resolution = input.resolvedBaseBranches[repo.id];
 			const baseBranch = resolution?.branch ?? repo.baseBranch;
+			const isHotfix = resolution?.source === "hotfix-elicitation";
+			const hotfixReminder = isHotfix
+				? `\n  <branch_type>hotfix</branch_type>\n  <branch_note>This is a hotfix. PRs MUST target "${baseBranch}".</branch_note>`
+				: "";
 			parts.push(`<context_reminder>
-  <base_branch>${baseBranch}</base_branch>
+  <base_branch>${baseBranch}</base_branch>${hotfixReminder}
 </context_reminder>`);
 		}
 

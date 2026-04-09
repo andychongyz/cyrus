@@ -5210,9 +5210,12 @@ ${taskSection}`;
 			systemPrompt +=
 				"\n\n## Question Mode\n\n" +
 				"IMPORTANT: The user explicitly classified this issue as a question/research request.\n" +
-				"Use the `investigate` skill to search the codebase and provide a thorough answer, then use `summarize`.\n" +
+				"Use the `investigate` skill to research and provide a concise, technically precise answer, then use `summarize`.\n" +
 				"Do NOT make code changes. Do NOT use the `implementation` or `verify-and-ship` skills.\n" +
-				"Do NOT create branches or pull requests. Focus entirely on researching and answering the question.";
+				"Do NOT create branches or pull requests. Focus entirely on researching and answering the question.\n\n" +
+				"Response style: Be direct and concise. Lead with the answer, not the search process. " +
+				"Include file paths and code references that support the answer, but omit exploratory dead ends. " +
+				"Target the shortest response that fully answers the question with technical context.";
 		}
 
 		// 4. Append agent context — dynamic values for skills to reference

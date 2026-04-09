@@ -58,14 +58,18 @@ Determine the platform from the repository context (`<github_url>` or `<gitlab_u
 
 ```bash
 git push -u origin HEAD
-gh pr view --json url,number 2>/dev/null || gh pr create --draft --base [base_branch from context] --title "[descriptive title]" --body "Work in progress"
+# IMPORTANT: Use the exact value from the <base_branch> tag in your <git_context> or <context_reminder>.
+# For hotfix branches (when <branch_type>hotfix</branch_type> is present), this will be "master" — never override it.
+gh pr view --json url,number 2>/dev/null || gh pr create --draft --base <base_branch value> --title "[descriptive title]" --body "Work in progress"
 ```
 
 ### GitLab (when `<gitlab_url>` is present)
 
 ```bash
 git push -u origin HEAD
-glab mr view 2>/dev/null || glab mr create --draft --target-branch [base_branch from context] --title "[descriptive title]" --description "Work in progress"
+# IMPORTANT: Use the exact value from the <base_branch> tag in your <git_context> or <context_reminder>.
+# For hotfix branches (when <branch_type>hotfix</branch_type> is present), this will be "master" — never override it.
+glab mr view 2>/dev/null || glab mr create --draft --target-branch <base_branch value> --title "[descriptive title]" --description "Work in progress"
 ```
 
 ### PR/MR Description
@@ -83,4 +87,4 @@ Update the PR/MR with a comprehensive description:
 
 Remove any "WIP:" or "Draft:" prefix from the title. Check `<agent_guidance>` — only mark the PR/MR as ready if guidance does NOT specify keeping them as drafts.
 
-Verify the PR/MR targets the correct base branch from `<base_branch>` in the issue context.
+CRITICAL: Verify the PR/MR targets the correct base branch. Read the `<base_branch>` value from the `<git_context>` or `<context_reminder>` XML block in your context. Use that exact value as the `--base` (GitHub) or `--target-branch` (GitLab) argument. Do NOT default to "develop" or any other branch — always use the value from `<base_branch>`.

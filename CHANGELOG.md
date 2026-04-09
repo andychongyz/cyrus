@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - **Branch prefix from hotfix elicitation now applied correctly** - When users chose "Hotfix" during branch elicitation, the branch was created with a `feature/` prefix instead of `hotfix/`. The user's explicit prefix choice is now propagated through to GitService and takes priority over the LLM-resolved prefix.
+- **Hotfix PRs now reliably target `master`** - When users select "hotfix" in the branch elicitation, Cyrus now consistently creates PRs targeting `master` instead of the repository default branch. The hotfix base-branch intent is tracked through the entire session — in the initial system prompt, continuation prompts, and the verify-and-ship skill — so it survives context compression during long sessions.
 
 ### Removed
 - **`labelBranchConfig`** - Removed from repository config. Replaced by LLM-based `BRANCHING_RULES.md`. Existing `labelBranchConfig` entries in `~/.cyrus/config.json` will be ignored.

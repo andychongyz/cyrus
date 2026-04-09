@@ -38,7 +38,12 @@ export interface BaseBranchResolution {
 	/** The resolved base branch name */
 	branch: string;
 	/** Why this branch was selected */
-	source: "commit-ish" | "graphite-blocked-by" | "parent-issue" | "default";
+	source:
+		| "commit-ish"
+		| "graphite-blocked-by"
+		| "parent-issue"
+		| "hotfix-elicitation"
+		| "default";
 	/** Human-readable detail (e.g., blocking issue identifier) */
 	detail?: string;
 }

@@ -8,6 +8,20 @@ This changelog documents internal development changes, refactors, tooling update
 - Replaced `labelBranchConfig` (JSON label→branch mapping) with `BranchRulesResolver` — a new class in `packages/edge-worker/src/BranchRulesResolver.ts` that reads `~/.cyrus/branching_rules/<repoId>/BRANCHING_RULES.md` and makes a single-turn Haiku API call (`fetch` to Anthropic `/v1/messages`) to resolve `{ base, prefix }` from issue content + labels. Falls back gracefully to `baseBranch`/no prefix on missing file or error.
 - Removed `labelBranchConfig` from `RepositoryConfigSchema` (Zod + JSON schemas).
 - Dashboard: replaced `LabelBranchEditor` component with a textarea for editing `BRANCHING_RULES.md` directly. New `GET/PUT /api/repositories/:id/branching-rules` endpoints in `server.ts`. File is auto-created with default content when a repo is added.
+- PR/MR and changelog-update skills now diff changelog entries against the base branch (not the last commit) to detect existing entries added by the current branch. Prevents duplicate entries and ensures existing entries are updated in-place. ([CYPACK-1063](https://linear.app/ceedar/issue/CYPACK-1063), [#1091](https://github.com/ceedaragents/cyrus/pull/1091))
+
+### Added
+- Added `WebhookIpValidator` utility to `cyrus-core` (`packages/core/src/security/`) with CIDR matching, known provider IP lists for Linear/GitHub/GitLab, and GitHub `/meta` API refresh support. Each event transport (`LinearEventTransport`, `GitHubEventTransport`, `GitLabEventTransport`) now accepts an optional `ipAllowlist` config and rejects requests from unauthorized IPs with HTTP 403 in signature/direct verification mode. Enabled `trustProxy` on Fastify server for correct `request.ip` behind reverse proxies. ([CYPACK-1056](https://linear.app/ceedar/issue/CYPACK-1056), [#1094](https://github.com/ceedaragents/cyrus/pull/1094))
+
+## [0.2.44] - 2026-04-10
+
+### Fixed
+- `buildAgentContextBlock()` now always emits `<agent_context>` with default bot usernames (`cyrusagent`) instead of returning empty string when `GITHUB_BOT_USERNAME`/`GITLAB_BOT_USERNAME` env vars are unset. Updated `verify-and-ship` skill to also include an explicit fallback instruction. ([CYPACK-1054](https://linear.app/ceedar/issue/CYPACK-1054), [#1082](https://github.com/ceedaragents/cyrus/pull/1082))
+
+## [0.2.43] - 2026-04-08
+
+### Changed
+- Introduced `ChatRepositoryProvider` interface and `LiveChatRepositoryProvider` implementation to decouple `SlackChatAdapter` and `ChatSessionHandler` from frozen boot-time repository snapshots. Both now read live repository state on demand at session-build time via the provider abstraction. Removed `chatRepositoryPaths`, `repository`, and `linearWorkspaceId` from `ChatSessionHandlerDeps` in favor of a single `chatRepositoryProvider` field. ([CYPACK-1051](https://linear.app/ceedar/issue/CYPACK-1051), [#1078](https://github.com/ceedaragents/cyrus/pull/1078))
 
 ## [0.2.42] - 2026-04-06
 

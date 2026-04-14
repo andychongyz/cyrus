@@ -8,13 +8,120 @@ All notable changes to this project will be documented in this file.
 - **LLM-based branching rules** - Cyrus now determines the base branch and branch name prefix for each issue by reading a plain-English `BRANCHING_RULES.md` file. The file is auto-created at `~/.cyrus/branching_rules/<repo-id>/BRANCHING_RULES.md` when a repository is added, and can be edited directly in the dashboard. This replaces the previous label-based JSON config and supports matching on issue title, description, and labels.
 - **Concise question-mode responses** - When issues are classified as questions, Cyrus now answers concisely with technical context instead of verbose research summaries. Responses lead with the answer, include file paths and code references, and use collapsible sections for depth.
 - **Production data retrieval for question mode** - The investigate skill now checks for `readonly-rails-console` availability and uses it to query production data when it would meaningfully improve the answer.
+- **Webhook IP provenance validation** — Incoming webhooks from Linear, GitHub, and GitLab are now validated against each provider's known source IP ranges. Enabled automatically in self-hosted mode (`CYRUS_HOST_EXTERNAL=true`); can be toggled with the `WEBHOOK_IP_VALIDATION` environment variable. GitHub CIDRs are refreshed from the `/meta` API on startup. ([CYPACK-1056](https://linear.app/ceedar/issue/CYPACK-1056), [#1094](https://github.com/ceedaragents/cyrus/pull/1094))
 
 ### Fixed
 - **Branch prefix from hotfix elicitation now applied correctly** - When users chose "Hotfix" during branch elicitation, the branch was created with a `feature/` prefix instead of `hotfix/`. The user's explicit prefix choice is now propagated through to GitService and takes priority over the LLM-resolved prefix.
 - **Hotfix PRs now reliably target `master`** - When users select "hotfix" in the branch elicitation, Cyrus now consistently creates PRs targeting `master` instead of the repository default branch. The hotfix base-branch intent is tracked through the entire session — in the initial system prompt, continuation prompts, and the verify-and-ship skill — so it survives context compression during long sessions.
+- **Changelog updates no longer create duplicate entries** — The PR/MR and changelog-update skills now diff entries against the base branch instead of only the last commit, correctly detecting entries already added by the current branch and updating them in-place. ([CYPACK-1063](https://linear.app/ceedar/issue/CYPACK-1063), [#1091](https://github.com/ceedaragents/cyrus/pull/1091))
 
 ### Removed
 - **`labelBranchConfig`** - Removed from repository config. Replaced by LLM-based `BRANCHING_RULES.md`. Existing `labelBranchConfig` entries in `~/.cyrus/config.json` will be ignored.
+
+## [0.2.44] - 2026-04-10
+
+### Fixed
+- **Repository `.env` variables are now scoped per-session** — Previously, `.env` files were loaded into the EdgeWorker's `process.env`, causing environment poisoning across sessions and repositories. Variables are now parsed into an isolated object and merged only into the child subprocess env, so updated or removed values take effect immediately and one repo's `.env` cannot leak into another. ([CYPACK-1059](https://linear.app/ceedar/issue/CYPACK-1059), [#1086](https://github.com/ceedaragents/cyrus/pull/1086))
+- **PR/MR interaction tips now correctly reference `@cyrusagent`** — Previously, when `GITHUB_BOT_USERNAME` or `GITLAB_BOT_USERNAME` environment variables were not set, PR/MR descriptions could show an incorrect bot username. The system now defaults to `cyrusagent`. ([CYPACK-1054](https://linear.app/ceedar/issue/CYPACK-1054), [#1082](https://github.com/ceedaragents/cyrus/pull/1082))
+
+### Packages
+
+#### cyrus-cloudflare-tunnel-client
+- cyrus-cloudflare-tunnel-client@0.2.44
+
+#### cyrus-mcp-tools
+- cyrus-mcp-tools@0.2.44
+
+#### cyrus-claude-runner
+- cyrus-claude-runner@0.2.44
+
+#### cyrus-core
+- cyrus-core@0.2.44
+
+#### cyrus-simple-agent-runner
+- cyrus-simple-agent-runner@0.2.44
+
+#### cyrus-codex-runner
+- cyrus-codex-runner@0.2.44
+
+#### cyrus-cursor-runner
+- cyrus-cursor-runner@0.2.44
+
+#### cyrus-config-updater
+- cyrus-config-updater@0.2.44
+
+#### cyrus-linear-event-transport
+- cyrus-linear-event-transport@0.2.44
+
+#### cyrus-github-event-transport
+- cyrus-github-event-transport@0.2.44
+
+#### cyrus-gitlab-event-transport
+- cyrus-gitlab-event-transport@0.2.44
+
+#### cyrus-slack-event-transport
+- cyrus-slack-event-transport@0.2.44
+
+#### cyrus-gemini-runner
+- cyrus-gemini-runner@0.2.44
+
+#### cyrus-edge-worker
+- cyrus-edge-worker@0.2.44
+
+#### cyrus-ai (CLI)
+- cyrus-ai@0.2.44
+
+## [0.2.43] - 2026-04-08
+
+### Fixed
+- **Slack chat sessions now see repositories added or removed at runtime** — Previously, Slack sessions used a stale snapshot of configured repositories from boot time, causing Cyrus to report missing access to repos that were actually configured. New sessions now always reflect the current repository configuration. ([CYPACK-1051](https://linear.app/ceedar/issue/CYPACK-1051), [#1078](https://github.com/ceedaragents/cyrus/pull/1078))
+
+### Packages
+
+#### cyrus-cloudflare-tunnel-client
+- cyrus-cloudflare-tunnel-client@0.2.43
+
+#### cyrus-mcp-tools
+- cyrus-mcp-tools@0.2.43
+
+#### cyrus-claude-runner
+- cyrus-claude-runner@0.2.43
+
+#### cyrus-core
+- cyrus-core@0.2.43
+
+#### cyrus-simple-agent-runner
+- cyrus-simple-agent-runner@0.2.43
+
+#### cyrus-codex-runner
+- cyrus-codex-runner@0.2.43
+
+#### cyrus-cursor-runner
+- cyrus-cursor-runner@0.2.43
+
+#### cyrus-config-updater
+- cyrus-config-updater@0.2.43
+
+#### cyrus-linear-event-transport
+- cyrus-linear-event-transport@0.2.43
+
+#### cyrus-github-event-transport
+- cyrus-github-event-transport@0.2.43
+
+#### cyrus-gitlab-event-transport
+- cyrus-gitlab-event-transport@0.2.43
+
+#### cyrus-slack-event-transport
+- cyrus-slack-event-transport@0.2.43
+
+#### cyrus-gemini-runner
+- cyrus-gemini-runner@0.2.43
+
+#### cyrus-edge-worker
+- cyrus-edge-worker@0.2.43
+
+#### cyrus-ai (CLI)
+- cyrus-ai@0.2.43
 
 ## [0.2.42] - 2026-04-06
 

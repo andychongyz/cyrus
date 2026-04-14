@@ -61,6 +61,7 @@ import {
 	PersistenceManager,
 	requireLinearWorkspaceId,
 	resolvePath,
+	WebhookIpValidator,
 } from "cyrus-core";
 import { CursorRunner } from "cyrus-cursor-runner";
 import { GeminiRunner } from "cyrus-gemini-runner";
@@ -126,6 +127,7 @@ import { AskUserQuestionHandler } from "./AskUserQuestionHandler.js";
 import { AttachmentService } from "./AttachmentService.js";
 import type { BranchElicitationChoice } from "./BranchElicitationHandler.js";
 import { BranchElicitationHandler } from "./BranchElicitationHandler.js";
+import { LiveChatRepositoryProvider } from "./ChatRepositoryProvider.js";
 import { ChatSessionHandler } from "./ChatSessionHandler.js";
 import { ConfigManager, type RepositoryChanges } from "./ConfigManager.js";
 import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
@@ -226,6 +228,8 @@ export class EdgeWorker extends EventEmitter {
 	private cyrusToolsMcpRequestContext =
 		new AsyncLocalStorage<CyrusToolsMcpContext>();
 	private cyrusToolsMcpSessions = new Sessions<any>();
+	/** Validates webhook source IPs against known provider allowlists */
+	private webhookIpValidator: WebhookIpValidator;
 	/**
 	 * Tracks recently processed issue-update webhook keys to prevent
 	 * duplicate deliveries from Linear's at-least-once delivery.
@@ -305,6 +309,23 @@ export class EdgeWorker extends EventEmitter {
 			getIssueTracker: (linearWorkspaceId: string) =>
 				this.getIssueTrackerForWorkspace(linearWorkspaceId) ?? null,
 		});
+
+		// Initialize webhook IP validator
+		// Enabled by default in self-hosted mode (CYRUS_HOST_EXTERNAL=true),
+		// can be overridden with WEBHOOK_IP_VALIDATION=false to disable
+		const isExternalHost =
+			process.env.CYRUS_HOST_EXTERNAL?.toLowerCase().trim() === "true";
+		const ipValidationEnv =
+			process.env.WEBHOOK_IP_VALIDATION?.toLowerCase().trim();
+		const ipValidationEnabled =
+			ipValidationEnv === "true" ||
+			(ipValidationEnv !== "false" && isExternalHost);
+		this.webhookIpValidator = new WebhookIpValidator({
+			enabled: ipValidationEnabled,
+		});
+		if (ipValidationEnabled) {
+			this.logger.info("Webhook IP validation enabled");
+		}
 
 		// Initialize shared application server
 		const serverPort = config.serverPort || config.webhookPort || 3456;
@@ -512,6 +533,16 @@ export class EdgeWorker extends EventEmitter {
 		// Initialize and register components BEFORE starting server (routes must be registered before listen())
 		await this.initializeComponents();
 
+		// Refresh GitHub webhook allowlist from /meta API (non-blocking)
+		if (this.webhookIpValidator.isEnabled()) {
+			this.webhookIpValidator.refreshGitHubAllowlist().catch((error) => {
+				this.logger.warn(
+					"Failed to refresh GitHub webhook allowlist",
+					error instanceof Error ? error : new Error(String(error)),
+				);
+			});
+		}
+
 		// Start shared application server (this also starts Cloudflare tunnel if CLOUDFLARE_TOKEN is set)
 		await this.sharedApplicationServer.start();
 	}
@@ -581,6 +612,10 @@ export class EdgeWorker extends EventEmitter {
 				fastifyServer: this.sharedApplicationServer.getFastifyInstance(),
 				verificationMode,
 				secret,
+				ipAllowlist:
+					verificationMode === "direct" && this.webhookIpValidator.isEnabled()
+						? this.webhookIpValidator.getAllowlist("linear")
+						: undefined,
 			});
 
 			// Listen for legacy webhook events (deprecated, kept for backward compatibility)
@@ -703,6 +738,10 @@ export class EdgeWorker extends EventEmitter {
 			fastifyServer: this.sharedApplicationServer.getFastifyInstance(),
 			verificationMode,
 			secret,
+			ipAllowlist:
+				useSignatureVerification && this.webhookIpValidator.isEnabled()
+					? this.webhookIpValidator.getAllowlist("github")
+					: undefined,
 		});
 
 		// Listen for legacy GitHub webhook events (deprecated, kept for backward compatibility)
@@ -769,6 +808,10 @@ export class EdgeWorker extends EventEmitter {
 			fastifyServer: this.sharedApplicationServer.getFastifyInstance(),
 			verificationMode,
 			secret,
+			ipAllowlist:
+				useSignatureVerification && this.webhookIpValidator.isEnabled()
+					? this.webhookIpValidator.getAllowlist("gitlab")
+					: undefined,
 		});
 
 		// Listen for legacy GitLab webhook events
@@ -805,23 +848,24 @@ export class EdgeWorker extends EventEmitter {
 	 * This creates a /slack-webhook endpoint that handles @mention events from Slack.
 	 */
 	private registerSlackEventTransport(): void {
-		const allRepos = Array.from(this.repositories.values());
-		const chatRepositoryPaths = allRepos.map((repo) => repo.repositoryPath);
+		// Live provider reads from the repository map on demand — no snapshot needed
+		const chatRepositoryProvider = new LiveChatRepositoryProvider(
+			this.repositories,
+			() => this.config.linearWorkspaces || {},
+		);
+
 		const routingContext =
 			this.promptBuilder.generateRoutingContextForAllWorkspaces();
 		const slackAdapter = new SlackChatAdapter(
-			chatRepositoryPaths,
+			chatRepositoryProvider,
 			this.logger,
 			{ repositoryRoutingContext: routingContext },
 		);
 
-		// V1: Source workspace/repo from first available (all repos share the same MCPs today)
-		const firstLinearWorkspaceId = Object.keys(
-			this.config.linearWorkspaces || {},
-		)[0];
-		const firstRepo = allRepos[0];
-
-		if (!firstLinearWorkspaceId || !firstRepo) {
+		if (
+			!chatRepositoryProvider.getDefaultLinearWorkspaceId() ||
+			!chatRepositoryProvider.getDefaultRepository()
+		) {
 			this.logger.warn(
 				"No repositories or workspaces configured — Slack sessions will not have access to MCP tools",
 			);
@@ -831,9 +875,7 @@ export class EdgeWorker extends EventEmitter {
 			slackAdapter,
 			{
 				cyrusHome: this.cyrusHome,
-				chatRepositoryPaths,
-				linearWorkspaceId: firstLinearWorkspaceId,
-				repository: firstRepo,
+				chatRepositoryProvider,
 				runnerConfigBuilder: this.runnerConfigBuilder,
 				createRunner: (config) => {
 					const runnerType = this.runnerSelectionService.getDefaultRunner();
@@ -5300,26 +5342,18 @@ ${input.userComment}
 	 * correct bot account without hardcoding.
 	 */
 	private buildAgentContextBlock(): string {
-		const githubBot = process.env.GITHUB_BOT_USERNAME || "";
+		const githubBot = process.env.GITHUB_BOT_USERNAME || "cyrusagent";
 		const githubBotUserId = process.env.GITHUB_BOT_USER_ID || "";
-		const gitlabBot = process.env.GITLAB_BOT_USERNAME || "";
-
-		if (!githubBot && !gitlabBot) {
-			return "";
-		}
+		const gitlabBot = process.env.GITLAB_BOT_USERNAME || "cyrusagent";
 
 		const lines: string[] = ["\n\n<agent_context>"];
-		if (githubBot) {
-			lines.push(`  <github_bot_username>${githubBot}</github_bot_username>`);
-		}
+		lines.push(`  <github_bot_username>${githubBot}</github_bot_username>`);
 		if (githubBotUserId) {
 			lines.push(
 				`  <github_bot_user_id>${githubBotUserId}</github_bot_user_id>`,
 			);
 		}
-		if (gitlabBot) {
-			lines.push(`  <gitlab_bot_username>${gitlabBot}</gitlab_bot_username>`);
-		}
+		lines.push(`  <gitlab_bot_username>${gitlabBot}</gitlab_bot_username>`);
 		lines.push("</agent_context>");
 
 		return lines.join("\n");

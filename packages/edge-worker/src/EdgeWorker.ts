@@ -262,6 +262,21 @@ export class EdgeWorker extends EventEmitter {
 	private processedIssueUpdateKeys = new Set<string>();
 
 	/**
+	 * Tracks agentSession IDs currently being initialized, to deduplicate
+	 * concurrent duplicate agentSessionCreated deliveries from Linear's
+	 * at-least-once guarantee before the session enters agentSessionManager.
+	 */
+	private processingSessionIds = new Set<string>();
+
+	/**
+	 * Tracks agentSession IDs that have already completed initialization,
+	 * to deduplicate very late retries that arrive after initializeAgentRunner
+	 * has already finished (and processingSessionIds has been cleaned up).
+	 * Pruned at 1000 entries to prevent unbounded growth.
+	 */
+	private handledSessionIds = new Set<string>();
+
+	/**
 	 * Sessions parked due to blocked-by dependencies.
 	 * Key: Linear issue ID (the blocked issue)
 	 * Value: All data needed to replay initializeAgentRunner when unblocked
@@ -4118,306 +4133,334 @@ ${taskSection}`;
 			return;
 		}
 
-		const primaryRepo = repositories[0]!;
+		// Deduplicate: guard against Linear's at-least-once delivery firing the same
+		// agentSessionCreated webhook twice. Check is synchronous (before any await) to
+		// close the race window between concurrent duplicate deliveries.
+		// processingSessionIds: covers concurrent/fast retries during initialization.
+		// handledSessionIds: covers very late retries after initialization has completed.
+		if (
+			this.processingSessionIds.has(sessionId) ||
+			this.handledSessionIds.has(sessionId)
+		) {
+			this.logger.warn(
+				`[AgentSessionManager] {session=${sessionId.slice(0, 8)}} Duplicate agentSessionCreated received, ignoring`,
+			);
+			return;
+		}
+		this.processingSessionIds.add(sessionId);
 
-		const log = this.logger.withContext({
-			sessionId,
-			issueIdentifier: issue.identifier,
-		});
+		try {
+			// End of deduplication guard — remainder of method wrapped in try/finally to ensure cleanup
 
-		// Log guidance if present
-		if (guidance && guidance.length > 0) {
-			log.debug(`Agent guidance received: ${guidance.length} rule(s)`);
-			for (const rule of guidance) {
-				let origin = "Unknown";
-				if (rule.origin) {
-					if (rule.origin.__typename === "TeamOriginWebhookPayload") {
-						origin = `Team: ${rule.origin.team.displayName}`;
-					} else {
-						origin = "Organization";
+			const primaryRepo = repositories[0]!;
+
+			const log = this.logger.withContext({
+				sessionId,
+				issueIdentifier: issue.identifier,
+			});
+
+			// Log guidance if present
+			if (guidance && guidance.length > 0) {
+				log.debug(`Agent guidance received: ${guidance.length} rule(s)`);
+				for (const rule of guidance) {
+					let origin = "Unknown";
+					if (rule.origin) {
+						if (rule.origin.__typename === "TeamOriginWebhookPayload") {
+							origin = `Team: ${rule.origin.team.displayName}`;
+						} else {
+							origin = "Organization";
+						}
+					}
+					log.info(`- ${origin}: ${rule.body.substring(0, 100)}...`);
+				}
+			}
+
+			// HACK: This is required since the comment body is always populated, thus there is no other way to differentiate between the two trigger events
+			const AGENT_SESSION_MARKER = "This thread is for an agent session";
+			const isMentionTriggered =
+				commentBody && !commentBody.includes(AGENT_SESSION_MARKER);
+			// Check if the comment contains the /label-based-prompt command
+			const isLabelBasedPromptRequested = commentBody?.includes(
+				"/label-based-prompt",
+			);
+
+			const agentSessionManager = this.agentSessionManager;
+
+			// Post instant acknowledgment thought
+			await this.postInstantAcknowledgment(sessionId, linearWorkspaceId);
+
+			// ── Branch elicitation: ask user about urgency before creating worktree ──
+			// Fetch labels early (using issue tracker service, not the full Issue object
+			// which isn't available until after createCyrusAgentSession)
+			let earlyLabels: string[] = [];
+			try {
+				const issueTracker =
+					this.getIssueTrackerForWorkspace(linearWorkspaceId);
+				if (issueTracker?.getIssueLabels) {
+					const labels = await issueTracker.getIssueLabels(issue.id);
+					if (Array.isArray(labels)) {
+						earlyLabels = labels.filter(
+							(l): l is string => typeof l === "string",
+						);
 					}
 				}
-				log.info(`- ${origin}: ${rule.body.substring(0, 100)}...`);
+			} catch (err) {
+				log.warn(`Failed to fetch early labels for branch elicitation: ${err}`);
 			}
-		}
+			const earlyLowercaseLabels = earlyLabels.map((l) => l.toLowerCase());
+			const primaryRepoId = primaryRepo.id;
 
-		// HACK: This is required since the comment body is always populated, thus there is no other way to differentiate between the two trigger events
-		const AGENT_SESSION_MARKER = "This thread is for an agent session";
-		const isMentionTriggered =
-			commentBody && !commentBody.includes(AGENT_SESSION_MARKER);
-		// Check if the comment contains the /label-based-prompt command
-		const isLabelBasedPromptRequested = commentBody?.includes(
-			"/label-based-prompt",
-		);
+			let branchPrefixOverrides: Map<string, string> | undefined;
+			let isHotfixBranch = false;
 
-		const agentSessionManager = this.agentSessionManager;
+			if (this.branchElicitationHandler.hasHotfixLabel(earlyLowercaseLabels)) {
+				// Hotfix label found — auto-resolve without asking (uses branching rules if available)
+				const hotfixChoice =
+					await this.branchElicitationHandler.resolveAutoHotfix(primaryRepoId);
+				log.info(
+					`Hotfix label detected, auto-resolving branch: ${hotfixChoice.baseBranch} with prefix ${hotfixChoice.prefix}`,
+				);
+				const elicitResult = this.applyBranchElicitationChoice(
+					hotfixChoice,
+					repositories,
+					baseBranchOverrides,
+					branchPrefixOverrides,
+				);
+				baseBranchOverrides = elicitResult.baseBranchOverrides;
+				branchPrefixOverrides = elicitResult.branchPrefixOverrides;
+				isHotfixBranch = true;
+			} else if (branchElicitationChoice) {
+				// Branch elicitation choice was provided (from webhook response)
+				log.info(
+					`Using elicited branch choice: ${branchElicitationChoice.baseBranch} with prefix ${branchElicitationChoice.prefix}`,
+				);
+				const elicitResult = this.applyBranchElicitationChoice(
+					branchElicitationChoice,
+					repositories,
+					baseBranchOverrides,
+					branchPrefixOverrides,
+				);
+				baseBranchOverrides = elicitResult.baseBranchOverrides;
+				branchPrefixOverrides = elicitResult.branchPrefixOverrides;
+				isHotfixBranch = branchElicitationChoice.isHotfix;
+			} else if (
+				this.branchElicitationHandler.shouldElicit(
+					earlyLowercaseLabels,
+					primaryRepoId,
+				)
+			) {
+				// No hotfix label, branching rules exist, no prior choice — ask the user
+				log.info("No hotfix label found, eliciting branch choice from user");
+				// Fire-and-forget: the promise resolves when user responds via webhook.
+				// We store the resume context so handleBranchElicitationResponse can
+				// continue initializeAgentRunner.
+				this.branchElicitationHandler.elicitBranchChoice(
+					sessionId,
+					linearWorkspaceId,
+					primaryRepoId,
+					{
+						agentSession,
+						repositories,
+						linearWorkspaceId,
+						guidance,
+						commentBody,
+						baseBranchOverrides,
+						routingMethod,
+					},
+				);
+				return; // Defer — session creation continues when user responds
+			}
+			// else: no branching rules file — skip elicitation, proceed normally
 
-		// Post instant acknowledgment thought
-		await this.postInstantAcknowledgment(sessionId, linearWorkspaceId);
+			// Create the session using the shared method (pass full repositories array)
+			const sessionData = await this.createCyrusAgentSession(
+				sessionId,
+				issue,
+				repositories,
+				agentSessionManager,
+				linearWorkspaceId,
+				baseBranchOverrides,
+				routingMethod,
+				branchPrefixOverrides,
+			);
 
-		// ── Branch elicitation: ask user about urgency before creating worktree ──
-		// Fetch labels early (using issue tracker service, not the full Issue object
-		// which isn't available until after createCyrusAgentSession)
-		let earlyLabels: string[] = [];
-		try {
-			const issueTracker = this.getIssueTrackerForWorkspace(linearWorkspaceId);
-			if (issueTracker?.getIssueLabels) {
-				const labels = await issueTracker.getIssueLabels(issue.id);
-				if (Array.isArray(labels)) {
-					earlyLabels = labels.filter(
-						(l): l is string => typeof l === "string",
-					);
+			// Tag resolved base branches with hotfix source for downstream prompt enrichment
+			if (isHotfixBranch && sessionData.workspace.resolvedBaseBranches) {
+				for (const resolution of Object.values(
+					sessionData.workspace.resolvedBaseBranches,
+				)) {
+					resolution.source = "hotfix-elicitation";
+					resolution.detail = "User selected hotfix in branch elicitation";
 				}
 			}
-		} catch (err) {
-			log.warn(`Failed to fetch early labels for branch elicitation: ${err}`);
-		}
-		const earlyLowercaseLabels = earlyLabels.map((l) => l.toLowerCase());
-		const primaryRepoId = primaryRepo.id;
 
-		let branchPrefixOverrides: Map<string, string> | undefined;
-		let isHotfixBranch = false;
-
-		if (this.branchElicitationHandler.hasHotfixLabel(earlyLowercaseLabels)) {
-			// Hotfix label found — auto-resolve without asking (uses branching rules if available)
-			const hotfixChoice =
-				await this.branchElicitationHandler.resolveAutoHotfix(primaryRepoId);
-			log.info(
-				`Hotfix label detected, auto-resolving branch: ${hotfixChoice.baseBranch} with prefix ${hotfixChoice.prefix}`,
-			);
-			const elicitResult = this.applyBranchElicitationChoice(
-				hotfixChoice,
-				repositories,
-				baseBranchOverrides,
-				branchPrefixOverrides,
-			);
-			baseBranchOverrides = elicitResult.baseBranchOverrides;
-			branchPrefixOverrides = elicitResult.branchPrefixOverrides;
-			isHotfixBranch = true;
-		} else if (branchElicitationChoice) {
-			// Branch elicitation choice was provided (from webhook response)
-			log.info(
-				`Using elicited branch choice: ${branchElicitationChoice.baseBranch} with prefix ${branchElicitationChoice.prefix}`,
-			);
-			const elicitResult = this.applyBranchElicitationChoice(
-				branchElicitationChoice,
-				repositories,
-				baseBranchOverrides,
-				branchPrefixOverrides,
-			);
-			baseBranchOverrides = elicitResult.baseBranchOverrides;
-			branchPrefixOverrides = elicitResult.branchPrefixOverrides;
-			isHotfixBranch = branchElicitationChoice.isHotfix;
-		} else if (
-			this.branchElicitationHandler.shouldElicit(
-				earlyLowercaseLabels,
-				primaryRepoId,
-			)
-		) {
-			// No hotfix label, branching rules exist, no prior choice — ask the user
-			log.info("No hotfix label found, eliciting branch choice from user");
-			// Fire-and-forget: the promise resolves when user responds via webhook.
-			// We store the resume context so handleBranchElicitationResponse can
-			// continue initializeAgentRunner.
-			this.branchElicitationHandler.elicitBranchChoice(
-				sessionId,
-				linearWorkspaceId,
-				primaryRepoId,
-				{
-					agentSession,
-					repositories,
-					linearWorkspaceId,
-					guidance,
-					commentBody,
-					baseBranchOverrides,
-					routingMethod,
-				},
-			);
-			return; // Defer — session creation continues when user responds
-		}
-		// else: no branching rules file — skip elicitation, proceed normally
-
-		// Create the session using the shared method (pass full repositories array)
-		const sessionData = await this.createCyrusAgentSession(
-			sessionId,
-			issue,
-			repositories,
-			agentSessionManager,
-			linearWorkspaceId,
-			baseBranchOverrides,
-			routingMethod,
-			branchPrefixOverrides,
-		);
-
-		// Tag resolved base branches with hotfix source for downstream prompt enrichment
-		if (isHotfixBranch && sessionData.workspace.resolvedBaseBranches) {
-			for (const resolution of Object.values(
-				sessionData.workspace.resolvedBaseBranches,
-			)) {
-				resolution.source = "hotfix-elicitation";
-				resolution.detail = "User selected hotfix in branch elicitation";
-			}
-		}
-
-		// Destructure the session data (excluding allowedTools which we'll build with promptType)
-		const {
-			session,
-			fullIssue,
-			workspace: _workspace,
-			attachmentResult,
-			attachmentsDir: _attachmentsDir,
-			allowedDirectories,
-		} = sessionData;
-
-		// Fetch labels early (needed for system prompt and runner selection)
-		const labels = await this.fetchIssueLabels(fullIssue);
-
-		log.info(`Starting agent session for issue ${fullIssue.identifier}`);
-
-		// Build and start Claude with initial prompt using full issue (streaming mode)
-		log.info(`Building initial prompt for issue ${fullIssue.identifier}`);
-		try {
-			// Create input for unified prompt assembly
-			const input: PromptAssemblyInput = {
+			// Destructure the session data (excluding allowedTools which we'll build with promptType)
+			const {
 				session,
 				fullIssue,
-				repositories,
-				repository: primaryRepo,
-				userComment: commentBody || "", // Empty for delegation, present for mentions
-				attachmentManifest: attachmentResult.manifest,
-				guidance: guidance || undefined,
-				agentSession,
-				labels,
-				isNewSession: true,
-				isStreaming: false, // Not yet streaming
-				isMentionTriggered: isMentionTriggered || false,
-				isLabelBasedPromptRequested: isLabelBasedPromptRequested || false,
-				isQuestion: branchElicitationChoice?.isQuestion || false,
-				resolvedBaseBranches: sessionData.workspace.resolvedBaseBranches,
-				linearWorkspaceId,
-			};
+				workspace: _workspace,
+				attachmentResult,
+				attachmentsDir: _attachmentsDir,
+				allowedDirectories,
+			} = sessionData;
 
-			// Use unified prompt assembly
-			const assembly = await this.assemblePrompt(input);
+			// Fetch labels early (needed for system prompt and runner selection)
+			const labels = await this.fetchIssueLabels(fullIssue);
 
-			// Get systemPromptVersion for tracking (TODO: add to PromptAssembly metadata)
-			let systemPromptVersion: string | undefined;
-			let promptType:
-				| "debugger"
-				| "builder"
-				| "scoper"
-				| "orchestrator"
-				| "graphite-orchestrator"
-				| undefined;
+			log.info(`Starting agent session for issue ${fullIssue.identifier}`);
 
-			if (!isMentionTriggered || isLabelBasedPromptRequested) {
-				const systemPromptResult = await this.determineSystemPromptFromLabels(
+			// Build and start Claude with initial prompt using full issue (streaming mode)
+			log.info(`Building initial prompt for issue ${fullIssue.identifier}`);
+			try {
+				// Create input for unified prompt assembly
+				const input: PromptAssemblyInput = {
+					session,
+					fullIssue,
+					repositories,
+					repository: primaryRepo,
+					userComment: commentBody || "", // Empty for delegation, present for mentions
+					attachmentManifest: attachmentResult.manifest,
+					guidance: guidance || undefined,
+					agentSession,
 					labels,
-					primaryRepo,
-				);
-				systemPromptVersion = systemPromptResult?.version;
-				promptType = systemPromptResult?.type;
+					isNewSession: true,
+					isStreaming: false, // Not yet streaming
+					isMentionTriggered: isMentionTriggered || false,
+					isLabelBasedPromptRequested: isLabelBasedPromptRequested || false,
+					isQuestion: branchElicitationChoice?.isQuestion || false,
+					resolvedBaseBranches: sessionData.workspace.resolvedBaseBranches,
+					linearWorkspaceId,
+				};
 
-				// Post thought about system prompt selection
-				if (assembly.systemPrompt) {
-					await this.postSystemPromptSelectionThought(
-						sessionId,
+				// Use unified prompt assembly
+				const assembly = await this.assemblePrompt(input);
+
+				// Get systemPromptVersion for tracking (TODO: add to PromptAssembly metadata)
+				let systemPromptVersion: string | undefined;
+				let promptType:
+					| "debugger"
+					| "builder"
+					| "scoper"
+					| "orchestrator"
+					| "graphite-orchestrator"
+					| undefined;
+
+				if (!isMentionTriggered || isLabelBasedPromptRequested) {
+					const systemPromptResult = await this.determineSystemPromptFromLabels(
 						labels,
-						linearWorkspaceId,
-						primaryRepo.id,
+						primaryRepo,
+					);
+					systemPromptVersion = systemPromptResult?.version;
+					promptType = systemPromptResult?.type;
+
+					// Post thought about system prompt selection
+					if (assembly.systemPrompt) {
+						await this.postSystemPromptSelectionThought(
+							sessionId,
+							labels,
+							linearWorkspaceId,
+							primaryRepo.id,
+						);
+					}
+				}
+
+				// Build allowed tools list with Linear MCP tools (now with prompt type context)
+				const allowedTools = this.buildAllowedTools(repositories, promptType);
+				const disallowedTools = this.buildDisallowedTools(
+					repositories,
+					promptType,
+				);
+
+				log.debug(
+					`Configured allowed tools for ${fullIssue.identifier}:`,
+					allowedTools,
+				);
+				if (disallowedTools.length > 0) {
+					log.debug(
+						`Configured disallowed tools for ${fullIssue.identifier}:`,
+						disallowedTools,
 					);
 				}
-			}
 
-			// Build allowed tools list with Linear MCP tools (now with prompt type context)
-			const allowedTools = this.buildAllowedTools(repositories, promptType);
-			const disallowedTools = this.buildDisallowedTools(
-				repositories,
-				promptType,
-			);
+				// Create agent runner with system prompt from assembly
+				// buildAgentRunnerConfig now determines runner type from labels internally
+				const { config: runnerConfig, runnerType } =
+					await this.buildAgentRunnerConfig(
+						session,
+						primaryRepo,
+						sessionId,
+						assembly.systemPrompt,
+						allowedTools,
+						allowedDirectories,
+						disallowedTools,
+						undefined, // resumeSessionId
+						labels, // Pass labels for runner selection and model override
+						fullIssue.description || undefined, // Description tags can override label selectors
+						undefined, // maxTurns
+						undefined, // mcpOptions
+						linearWorkspaceId,
+					);
 
-			log.debug(
-				`Configured allowed tools for ${fullIssue.identifier}:`,
-				allowedTools,
-			);
-			if (disallowedTools.length > 0) {
 				log.debug(
-					`Configured disallowed tools for ${fullIssue.identifier}:`,
-					disallowedTools,
-				);
-			}
-
-			// Create agent runner with system prompt from assembly
-			// buildAgentRunnerConfig now determines runner type from labels internally
-			const { config: runnerConfig, runnerType } =
-				await this.buildAgentRunnerConfig(
-					session,
-					primaryRepo,
-					sessionId,
-					assembly.systemPrompt,
-					allowedTools,
-					allowedDirectories,
-					disallowedTools,
-					undefined, // resumeSessionId
-					labels, // Pass labels for runner selection and model override
-					fullIssue.description || undefined, // Description tags can override label selectors
-					undefined, // maxTurns
-					undefined, // mcpOptions
-					linearWorkspaceId,
+					`Label-based runner selection for new session: ${runnerType} (session ${sessionId})`,
 				);
 
-			log.debug(
-				`Label-based runner selection for new session: ${runnerType} (session ${sessionId})`,
-			);
+				const runner = this.createRunnerForType(runnerType, runnerConfig);
 
-			const runner = this.createRunnerForType(runnerType, runnerConfig);
+				// Store runner by comment ID
+				agentSessionManager.addAgentRunner(sessionId, runner);
 
-			// Store runner by comment ID
-			agentSessionManager.addAgentRunner(sessionId, runner);
+				// Save state after mapping changes
+				await this.savePersistedState();
 
-			// Save state after mapping changes
-			await this.savePersistedState();
+				// Emit events using full issue (core Issue type)
+				this.emit("session:started", fullIssue.id, fullIssue, primaryRepo.id);
+				this.config.handlers?.onSessionStart?.(
+					fullIssue.id,
+					fullIssue,
+					primaryRepo.id,
+				);
 
-			// Emit events using full issue (core Issue type)
-			this.emit("session:started", fullIssue.id, fullIssue, primaryRepo.id);
-			this.config.handlers?.onSessionStart?.(
-				fullIssue.id,
-				fullIssue,
-				primaryRepo.id,
-			);
+				// Update runner with version information (if available)
+				// Note: updatePromptVersions is specific to ClaudeRunner
+				if (
+					systemPromptVersion &&
+					"updatePromptVersions" in runner &&
+					typeof runner.updatePromptVersions === "function"
+				) {
+					runner.updatePromptVersions({
+						systemPromptVersion,
+					});
+				}
 
-			// Update runner with version information (if available)
-			// Note: updatePromptVersions is specific to ClaudeRunner
-			if (
-				systemPromptVersion &&
-				"updatePromptVersions" in runner &&
-				typeof runner.updatePromptVersions === "function"
-			) {
-				runner.updatePromptVersions({
-					systemPromptVersion,
-				});
+				// Log metadata for debugging
+				log.debug(
+					`Initial prompt built successfully - components: ${assembly.metadata.components.join(", ")}, type: ${assembly.metadata.promptType}, length: ${assembly.userPrompt.length} characters`,
+				);
+
+				// Start session - use streaming mode if supported for ability to add messages later
+				if (runner.supportsStreamingInput && runner.startStreaming) {
+					log.debug(`Starting streaming session`);
+					const sessionInfo = await runner.startStreaming(assembly.userPrompt);
+					log.debug(`Streaming session started: ${sessionInfo.sessionId}`);
+				} else {
+					log.debug(`Starting non-streaming session`);
+					const sessionInfo = await runner.start(assembly.userPrompt);
+					log.debug(`Non-streaming session started: ${sessionInfo.sessionId}`);
+				}
+				// Note: AgentSessionManager will be initialized automatically when the first system message
+				// is received via handleClaudeMessage() callback
+			} catch (error) {
+				log.error(`Error in prompt building/starting:`, error);
+				throw error;
 			}
-
-			// Log metadata for debugging
-			log.debug(
-				`Initial prompt built successfully - components: ${assembly.metadata.components.join(", ")}, type: ${assembly.metadata.promptType}, length: ${assembly.userPrompt.length} characters`,
-			);
-
-			// Start session - use streaming mode if supported for ability to add messages later
-			if (runner.supportsStreamingInput && runner.startStreaming) {
-				log.debug(`Starting streaming session`);
-				const sessionInfo = await runner.startStreaming(assembly.userPrompt);
-				log.debug(`Streaming session started: ${sessionInfo.sessionId}`);
-			} else {
-				log.debug(`Starting non-streaming session`);
-				const sessionInfo = await runner.start(assembly.userPrompt);
-				log.debug(`Non-streaming session started: ${sessionInfo.sessionId}`);
+		} finally {
+			this.processingSessionIds.delete(sessionId);
+			this.handledSessionIds.add(sessionId);
+			if (this.handledSessionIds.size > 1000) {
+				const first = this.handledSessionIds.values().next().value!;
+				this.handledSessionIds.delete(first);
 			}
-			// Note: AgentSessionManager will be initialized automatically when the first system message
-			// is received via handleClaudeMessage() callback
-		} catch (error) {
-			log.error(`Error in prompt building/starting:`, error);
-			throw error;
 		}
 	}
 

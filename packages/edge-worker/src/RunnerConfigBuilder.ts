@@ -3,6 +3,7 @@ import type {
 	HookEvent,
 	McpServerConfig,
 	PostToolUseHookInput,
+	PreToolUseHookInput,
 	SandboxSettings,
 	SDKMessage,
 	SdkPluginConfig,
@@ -10,6 +11,7 @@ import type {
 } from "cyrus-claude-runner";
 import type {
 	AgentRunnerConfig,
+	BaseBranchResolution,
 	CyrusAgentSession,
 	ILogger,
 	OnAskUserQuestion,
@@ -209,10 +211,11 @@ export class RunnerConfigBuilder {
 	} {
 		const log = input.logger;
 
-		// Configure hooks: PostToolUse for screenshot tools + Stop hook for PR/summary enforcement
+		// Configure hooks: PreToolUse for skill context injection + PostToolUse for screenshots + Stop
 		const screenshotHooks = this.buildScreenshotHooks(log);
 		const stopHook = this.buildStopHook(log);
-		const hooks = { ...screenshotHooks, ...stopHook };
+		const verifyAndShipHook = this.buildVerifyAndShipContextHook(input);
+		const hooks = { ...screenshotHooks, ...stopHook, ...verifyAndShipHook };
 
 		// Determine runner type and model override from selectors
 		const runnerSelection = this.runnerSelector.determineRunnerSelection(
@@ -368,6 +371,62 @@ export class RunnerConfigBuilder {
 								additionalContext:
 									"Before stopping, ensure you have committed and pushed all code changes and created/updated a PR (if you made any code changes).\n\n" +
 									"If you have already done this (or no code changes were made), you may stop again.",
+							};
+						},
+					],
+				},
+			],
+		};
+	}
+
+	private static readonly VERIFY_AND_SHIP_SKILL = "verify-and-ship";
+
+	/**
+	 * Build a PreToolUse hook that re-injects `<context_reminder>` immediately
+	 * before the verify-and-ship skill runs. This ensures the correct base branch
+	 * is visible even after many turns or context compression.
+	 *
+	 * Only fires when `tool_name === "Skill"` and `tool_input.skill === "verify-and-ship"`.
+	 * No-op when the workspace has no resolvedBaseBranches.
+	 */
+	private buildVerifyAndShipContextHook(
+		input: IssueRunnerConfigInput,
+	): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
+		const resolvedBaseBranches = input.session.workspace.resolvedBaseBranches;
+		if (!resolvedBaseBranches) {
+			return {};
+		}
+
+		const repo = input.repository;
+
+		return {
+			PreToolUse: [
+				{
+					matcher: "Skill",
+					hooks: [
+						async (hookInput) => {
+							const preToolInput = hookInput as PreToolUseHookInput;
+							const toolInput = preToolInput.tool_input as { skill?: string };
+
+							if (
+								toolInput?.skill !== RunnerConfigBuilder.VERIFY_AND_SHIP_SKILL
+							) {
+								return { continue: true };
+							}
+
+							const resolution: BaseBranchResolution | undefined =
+								resolvedBaseBranches[repo.id];
+							const baseBranch = resolution?.branch ?? repo.baseBranch;
+							const isHotfix = resolution?.source === "hotfix-elicitation";
+							const hotfixBlock = isHotfix
+								? `\n  <branch_type>hotfix</branch_type>\n  <branch_note>This is a hotfix. PRs MUST target "${baseBranch}".</branch_note>`
+								: "";
+
+							return {
+								continue: true,
+								additionalContext: `<context_reminder>
+  <base_branch>${baseBranch}</base_branch>${hotfixBlock}
+</context_reminder>`,
 							};
 						},
 					],

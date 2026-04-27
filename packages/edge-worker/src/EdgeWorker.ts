@@ -5990,6 +5990,27 @@ ${input.userComment}
 	}
 
 	/**
+	 * Build a `<context_reminder>` XML block for the given repository and
+	 * resolved base branches map. Returns the block string if a base branch
+	 * can be determined, or undefined when resolvedBaseBranches is absent.
+	 */
+	private buildContextReminderBlock(
+		resolvedBaseBranches: Record<string, BaseBranchResolution> | undefined,
+		repo: RepositoryConfig,
+	): string | undefined {
+		if (!resolvedBaseBranches) return undefined;
+		const resolution = resolvedBaseBranches[repo.id];
+		const baseBranch = resolution?.branch ?? repo.baseBranch;
+		const isHotfix = resolution?.source === "hotfix-elicitation";
+		const hotfixBlock = isHotfix
+			? `\n  <branch_type>hotfix</branch_type>\n  <branch_note>This is a hotfix. PRs MUST target "${baseBranch}".</branch_note>`
+			: "";
+		return `<context_reminder>
+  <base_branch>${baseBranch}</base_branch>${hotfixBlock}
+</context_reminder>`;
+	}
+
+	/**
 	 * Build prompt for existing session continuation - user comment and attachments only
 	 */
 	private buildContinuationPrompt(input: PromptAssemblyInput): PromptAssembly {
@@ -6002,17 +6023,12 @@ ${input.userComment}
 
 		// Re-inject base branch context so subroutines (changelog-update, gh-pr)
 		// always see the correct base branch, even after context compression
-		if (input.resolvedBaseBranches) {
-			const repo = input.repository;
-			const resolution = input.resolvedBaseBranches[repo.id];
-			const baseBranch = resolution?.branch ?? repo.baseBranch;
-			const isHotfix = resolution?.source === "hotfix-elicitation";
-			const hotfixReminder = isHotfix
-				? `\n  <branch_type>hotfix</branch_type>\n  <branch_note>This is a hotfix. PRs MUST target "${baseBranch}".</branch_note>`
-				: "";
-			parts.push(`<context_reminder>
-  <base_branch>${baseBranch}</base_branch>${hotfixReminder}
-</context_reminder>`);
+		const contextReminder = this.buildContextReminderBlock(
+			input.resolvedBaseBranches,
+			input.repository,
+		);
+		if (contextReminder) {
+			parts.push(contextReminder);
 		}
 
 		// Wrap comment in XML with author and timestamp for multi-player context

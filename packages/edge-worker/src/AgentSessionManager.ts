@@ -1216,10 +1216,10 @@ export class AgentSessionManager extends EventEmitter {
 				return;
 			}
 
-			const result = await activitySink.postActivity(
-				session.externalSessionId,
-				content,
-				options,
+			const externalSessionId = session.externalSessionId;
+			const result = await this.retryPostActivity(
+				() => activitySink.postActivity(externalSessionId!, content, options),
+				log,
 			);
 
 			if (result.activityId) {
@@ -1237,6 +1237,61 @@ export class AgentSessionManager extends EventEmitter {
 		} catch (error) {
 			log.error(`Failed to sync entry to activity sink:`, error);
 		}
+	}
+
+	private isTransientNetworkError(error: unknown): boolean {
+		if (!(error instanceof Error)) return false;
+		const code = (error as NodeJS.ErrnoException).code;
+		if (
+			code === "ECONNRESET" ||
+			code === "ECONNREFUSED" ||
+			code === "ETIMEDOUT" ||
+			code === "ENOTFOUND"
+		) {
+			return true;
+		}
+		const cause = (error as any).cause;
+		if (cause instanceof Error) {
+			const causeCode = (cause as NodeJS.ErrnoException).code;
+			if (
+				causeCode === "ECONNRESET" ||
+				causeCode === "ECONNREFUSED" ||
+				causeCode === "ETIMEDOUT" ||
+				causeCode === "ENOTFOUND"
+			) {
+				return true;
+			}
+		}
+		const raw = (error as any).raw;
+		if (raw instanceof Error && this.isTransientNetworkError(raw)) {
+			return true;
+		}
+		return false;
+	}
+
+	private async retryPostActivity<T>(
+		fn: () => Promise<T>,
+		log: ReturnType<typeof this.sessionLog>,
+		maxAttempts = 4,
+	): Promise<T> {
+		let lastError: unknown;
+		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+			try {
+				return await fn();
+			} catch (error) {
+				lastError = error;
+				if (!this.isTransientNetworkError(error) || attempt === maxAttempts) {
+					throw error;
+				}
+				const delayMs = Math.min(1000 * 2 ** (attempt - 1), 8000);
+				log.warn(
+					`Transient network error posting activity (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs}ms:`,
+					error,
+				);
+				await new Promise((resolve) => setTimeout(resolve, delayMs));
+			}
+		}
+		throw lastError;
 	}
 
 	/**

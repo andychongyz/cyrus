@@ -4,12 +4,14 @@ import type {
 	JsonSchemaOutputFormat,
 	McpServerConfig,
 	OutputFormat,
+	SandboxSettings,
 	SDKAssistantMessage,
 	SDKMessage,
 	SDKResultMessage,
 	SDKSystemMessage,
 	SDKUserMessage,
 	SdkPluginConfig,
+	WarmQuery,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { ILogger, OnAskUserQuestion } from "cyrus-core";
 
@@ -46,6 +48,10 @@ export interface ClaudeRunnerConfig {
 	hooks?: Partial<Record<HookEvent, HookCallbackMatcher[]>>; // Claude SDK hooks
 	plugins?: SdkPluginConfig[]; // Plugins providing skills, agents, hooks, and MCP servers
 	outputFormat?: OutputFormatConfig; // Structured output format configuration
+	sandbox?: SandboxSettings; // Sandbox settings (enabled, network proxy ports, etc.)
+	/** Additional environment variables to pass to the Claude child process (merged after process.env) */
+	additionalEnv?: Record<string, string>;
+	pathToClaudeCodeExecutable?: string; // Explicit path to Claude Code CLI executable (auto-resolved if not set)
 	extraArgs?: Record<string, string | null>; // Additional CLI arguments to pass to Claude Code (e.g., { chrome: null } for --chrome flag)
 	/**
 	 * Callback for handling AskUserQuestion tool invocations.
@@ -58,6 +64,11 @@ export interface ClaudeRunnerConfig {
 	onMessage?: (message: SDKMessage) => void | Promise<void>;
 	onError?: (error: Error) => void | Promise<void>;
 	onComplete?: (messages: SDKMessage[]) => void | Promise<void>;
+	/**
+	 * Pre-warmed session from startup() — when set, the first streaming query uses
+	 * this warm instance instead of spawning a cold process (~20x faster first turn).
+	 */
+	warmSession?: WarmQuery;
 }
 
 export interface ClaudeSessionInfo {
@@ -81,6 +92,7 @@ export type {
 	JsonSchemaOutputFormat,
 	McpServerConfig,
 	OutputFormat,
+	SandboxSettings,
 	SDKAssistantMessage,
 	SDKMessage,
 	SDKRateLimitEvent,

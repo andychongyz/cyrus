@@ -42,22 +42,26 @@ interface SessionRegistry {
 /**
  * ConfigUpdater registers configuration update routes with a Fastify server
  * Handles: cyrus-config, cyrus-env, repository, update/test-mcp, update/configure-mcp, check-gh endpoints
+ *
+ * `getApiKey` is invoked on every auth check, so callers reading from
+ * `process.env.CYRUS_API_KEY` pick up `.env` reloads (triggered by
+ * `cyrus auth` after a credential rotation) without restarting the process.
  */
 export class ConfigUpdater {
 	private fastify: FastifyInstance;
 	private cyrusHome: string;
-	private apiKey: string;
+	private getApiKey: () => string;
 	private sessionRegistry?: SessionRegistry;
 
 	constructor(
 		fastify: FastifyInstance,
 		cyrusHome: string,
-		apiKey: string,
+		getApiKey: () => string,
 		sessionRegistry?: SessionRegistry,
 	) {
 		this.fastify = fastify;
 		this.cyrusHome = cyrusHome;
-		this.apiKey = apiKey;
+		this.getApiKey = getApiKey;
 		this.sessionRegistry = sessionRegistry;
 	}
 
@@ -190,11 +194,12 @@ export class ConfigUpdater {
 	 * Verify Bearer token authentication
 	 */
 	private verifyAuth(authHeader: string | undefined): boolean {
-		if (!authHeader || !this.apiKey) {
+		const apiKey = this.getApiKey();
+		if (!authHeader || !apiKey) {
 			return false;
 		}
 
-		const expectedAuth = `Bearer ${this.apiKey}`;
+		const expectedAuth = `Bearer ${apiKey}`;
 		return authHeader === expectedAuth;
 	}
 

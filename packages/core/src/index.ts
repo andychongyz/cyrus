@@ -46,10 +46,12 @@ export type {
 	EdgeConfigPayload,
 	EdgeWorkerConfig,
 	LinearWorkspaceConfig,
+	NetworkPolicy,
 	OAuthCallbackHandler,
 	RepositoryConfig,
 	RepositoryConfigPayload,
 	RunnerType,
+	SandboxConfig,
 	UserAccessControlConfig,
 	UserIdentifier,
 } from "./config-types.js";
@@ -59,11 +61,14 @@ export {
 	EdgeConfigSchema,
 	LinearWorkspaceConfigSchema,
 	migrateEdgeConfig,
+	NetworkPolicySchema,
 	RepositoryConfigPayloadSchema,
 	RepositoryConfigSchema,
 	RunnerTypeSchema,
 	requireLinearWorkspaceId,
 	resolvePath,
+	SandboxConfigSchema,
+	TRUSTED_DOMAINS,
 	UserAccessControlConfigSchema,
 	UserIdentifierSchema,
 } from "./config-types.js";
@@ -73,7 +78,10 @@ export {
 	DEFAULT_BASE_BRANCH,
 	DEFAULT_CONFIG_FILENAME,
 	DEFAULT_PROXY_URL,
+	DEFAULT_REPOS_DIR,
 	DEFAULT_WORKTREES_DIR,
+	getDefaultReposDir,
+	getDefaultWorktreesDir,
 } from "./constants.js";
 // Issue Tracker Abstraction
 export type {
@@ -139,6 +147,7 @@ export {
 	isIssueDeletedWebhook,
 	isIssueNewCommentWebhook,
 	isIssueStateChangeWebhook,
+	isIssueStateIdUpdateWebhook,
 	isIssueTitleOrDescriptionUpdateWebhook,
 	isIssueUnassignedEvent,
 	isIssueUnassignedWebhook,

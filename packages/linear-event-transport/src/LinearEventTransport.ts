@@ -134,17 +134,17 @@ export class LinearEventTransport
 			return;
 		}
 
-		// Validate source IP against Linear's known webhook IPs
+		// Advisory IP check — Linear now routes webhooks through Cloudflare, so the
+		// source IP may not match the documented GCP IPs. HMAC signature below is the
+		// authoritative security control; here we only log an unexpected IP.
 		if (
 			this.config.ipAllowlist &&
 			this.config.ipAllowlist.length > 0 &&
 			!ipMatchesAllowlist(request.ip, this.config.ipAllowlist)
 		) {
 			this.logger.warn(
-				`Rejected Linear webhook from unauthorized IP: ${request.ip}`,
+				`Linear webhook from unlisted IP: ${request.ip} — proceeding with HMAC verification`,
 			);
-			reply.code(403).send({ error: "Forbidden: unauthorized source IP" });
-			return;
 		}
 
 		// Get Linear signature from headers

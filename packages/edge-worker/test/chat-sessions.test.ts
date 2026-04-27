@@ -138,7 +138,7 @@ describe("ChatSessionHandler chat session permissions", () => {
 
 		expect(capturedConfig).toBeDefined();
 		expect(capturedConfig.allowedTools).toContain("Read(**)");
-		expect(capturedConfig.allowedTools).toContain("TodoRead");
+		expect(capturedConfig.allowedTools).toContain("Glob");
 		expect(capturedConfig.allowedTools).toContain("Bash(git -C * pull)");
 		expect(capturedConfig.allowedTools).not.toContain("Edit(**)");
 

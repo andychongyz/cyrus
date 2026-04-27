@@ -316,6 +316,13 @@ export interface IAgentRunner {
 	stop(): void;
 
 	/**
+	 * Interrupt the current turn without killing the session.
+	 * The session stays warm and can accept new messages.
+	 * Only supported on Claude runner (streaming mode).
+	 */
+	interrupt?(): Promise<void>;
+
+	/**
 	 * Check if the session is currently running
 	 *
 	 * @returns True if the session is active and processing, false otherwise
@@ -391,7 +398,7 @@ export interface IAgentRunner {
 export interface AgentRunnerConfig {
 	/** Working directory for the agent session */
 	workingDirectory?: string;
-	/** List of allowed tool patterns (e.g., ["Read(**)", "Edit(**)"]) */
+	/** List of allowed tool names (e.g., ["Read", "Edit", "Bash"]) */
 	allowedTools?: string[];
 	/** List of disallowed tool patterns */
 	disallowedTools?: string[];

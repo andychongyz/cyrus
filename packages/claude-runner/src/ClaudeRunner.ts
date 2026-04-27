@@ -11,6 +11,7 @@ import { join } from "node:path";
 import {
 	type CanUseTool,
 	type PermissionResult,
+	type Query,
 	query,
 	type SDKMessage,
 	type SDKUserMessage,
@@ -20,9 +21,25 @@ import {
 	createLogger,
 	type IAgentRunner,
 	type ILogger,
+	LogLevel,
 	StreamingPrompt,
 } from "cyrus-core";
 import dotenv from "dotenv";
+import { ClaudeMessageFormatter, type IMessageFormatter } from "./formatter.js";
+import { buildHomeDirectoryDisallowedTools } from "./home-directory-restrictions.js";
+import {
+	checkLinuxSandboxRequirements,
+	logSandboxRequirementFailures,
+} from "./sandbox-requirements.js";
+import {
+	buildBaseSessionEnv,
+	normalizeMcpHttpTransport,
+} from "./session-env.js";
+import type {
+	ClaudeRunnerConfig,
+	ClaudeRunnerEvents,
+	ClaudeSessionInfo,
+} from "./types.js";
 
 // AbortError is no longer exported in v1.0.95, so we define it locally
 export class AbortError extends Error {
@@ -32,12 +49,28 @@ export class AbortError extends Error {
 	}
 }
 
-import { ClaudeMessageFormatter, type IMessageFormatter } from "./formatter.js";
-import type {
-	ClaudeRunnerConfig,
-	ClaudeRunnerEvents,
-	ClaudeSessionInfo,
-} from "./types.js";
+/**
+ * JSON.stringify replacer for Claude query options. The SDK's query options
+ * include non-serializable members (AbortController, async iterables,
+ * callbacks, pre-warmed sessions) — replace them with diagnostic placeholders
+ * so debug logs remain valid JSON.
+ */
+function serializeQueryOptionsReplacer(_key: string, value: unknown): unknown {
+	if (typeof value === "function") {
+		return `[Function${value.name ? `: ${value.name}` : ""}]`;
+	}
+	if (value instanceof AbortController) {
+		return "[AbortController]";
+	}
+	if (
+		value !== null &&
+		typeof value === "object" &&
+		Symbol.asyncIterator in (value as object)
+	) {
+		return "[AsyncIterable]";
+	}
+	return value;
+}
 
 export declare interface ClaudeRunner {
 	on<K extends keyof ClaudeRunnerEvents>(
@@ -67,15 +100,18 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 	private readableLogStream: WriteStream | null = null;
 	private messages: SDKMessage[] = [];
 	private streamingPrompt: StreamingPrompt | null = null;
+	private activeQuery: Query | null = null;
 	private cyrusHome: string;
 	private formatter: IMessageFormatter;
 	private pendingResultMessage: SDKMessage | null = null;
 	private canUseToolCallback: CanUseTool | undefined;
 	private repositoryEnv: Record<string, string> = {};
+	private keepSessionWarm: boolean;
 
-	constructor(config: ClaudeRunnerConfig) {
+	constructor(config: ClaudeRunnerConfig, keepSessionWarm = false) {
 		super();
 		this.config = config;
+		this.keepSessionWarm = keepSessionWarm;
 		this.logger = config.logger ?? createLogger({ component: "ClaudeRunner" });
 		this.cyrusHome = config.cyrusHome;
 		this.formatter = new ClaudeMessageFormatter();
@@ -329,15 +365,29 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 					: directoryTools;
 			}
 
-			// Process disallowed tools - no defaults, just pass through
-			// Only pass if array is non-empty
-			const processedDisallowedTools =
-				this.config.disallowedTools && this.config.disallowedTools.length > 0
-					? this.config.disallowedTools
-					: undefined;
+			// Build home directory restrictions: deny Read on everything in ~/
+			// that is not an ancestor of the working directory. This prevents
+			// Claude from reading SSH keys, credentials, etc. `Read(~/**)` does
+			// not work as a disallowedTools pattern — `~` is not expanded to the
+			// home directory path, so the pattern never matches.
+			const homeDisallowedTools = this.config.workingDirectory
+				? buildHomeDirectoryDisallowedTools(
+						this.config.workingDirectory,
+						this.config.allowedDirectories ?? [],
+					)
+				: [];
+
+			// Merge config-level denials with home directory denials, deduplicating in case
+			// any paths appear in both (e.g. an allowedDirectory that is also explicitly denied).
+			const processedDisallowedTools = [
+				...new Set([
+					...(this.config.disallowedTools ?? []),
+					...homeDisallowedTools,
+				]),
+			];
 
 			// Log disallowed tools if configured
-			if (processedDisallowedTools) {
+			if (processedDisallowedTools.length > 0) {
 				this.logger.debug(
 					"Disallowed tools configured:",
 					processedDisallowedTools,
@@ -381,17 +431,7 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 					const mcpConfigContent = readFileSync(path, "utf8");
 					const mcpConfig = JSON.parse(mcpConfigContent);
 					const servers = mcpConfig.mcpServers || {};
-					// Normalize transport type for file-loaded configs.
-					// Config files (.mcp.json, mcp-*.json) often omit the `type` field,
-					// but the SDK requires an explicit discriminator for non-stdio transports.
-					for (const config of Object.values(servers) as Record<
-						string,
-						unknown
-					>[]) {
-						if (!config.type && typeof config.url === "string") {
-							config.type = "http";
-						}
-					}
+					normalizeMcpHttpTransport(servers);
 					mcpServers = { ...mcpServers, ...servers };
 					this.logger.debug(
 						`Loaded MCP servers from ${path}: ${Object.keys(servers).join(", ")}`,
@@ -417,6 +457,20 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 				);
 			}
 
+			const pathToClaudeCodeExecutable = this.config.pathToClaudeCodeExecutable;
+
+			// On Linux, setting CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 causes the SDK
+			// to run tool invocations under a bubblewrap-backed sandbox. If the
+			// host lacks `socat`, `bubblewrap`, or the kernel/AppArmor config
+			// needed to create an unprivileged user namespace, the sandbox will
+			// fail at runtime. Check those requirements up front so we can fall
+			// back to unscrubbed env (and log resolution guidance to stdout)
+			// instead of failing opaquely mid-session.
+			const sandboxRequirements = checkLinuxSandboxRequirements();
+			logSandboxRequirementFailures(sandboxRequirements, this.logger);
+
+			const isDebugLogging = this.logger.getLevel() === LogLevel.DEBUG;
+
 			const queryOptions: Parameters<typeof query>[0] = {
 				prompt: promptForQuery,
 				options: {
@@ -438,8 +492,17 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 					settingSources: ["user", "project", "local"],
 					env: Object.fromEntries(
 						Object.entries({
+							...buildBaseSessionEnv(),
+							// CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is intentionally NOT set while
+							// the Linux bubblewrap sandbox side effects it triggers are being
+							// investigated. The sandbox requirements precheck is still run
+							// above so the diagnostics remain available when we re-enable.
+							// See: CYPACK-1108.
 							...this.repositoryEnv,
-							...process.env,
+							...this.config.additionalEnv,
+							// When logging at DEBUG level, enable the SDK's own debug output so
+							// --debug-to-stderr and DEBUG=1 propagate to the Claude subprocess.
+							...(isDebugLogging && { DEBUG_CLAUDE_AGENT_SDK: "1" }),
 							// Always exclude ANTHROPIC_API_KEY from Claude runner sessions.
 							// The API key is only needed for direct API calls (BranchRulesResolver,
 							// ProcedureAnalyzer), not for Claude Code sessions which use OAuth.
@@ -448,9 +511,6 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 							// If cyrus-agent was started inside a Claude Code session it inherits
 							// CLAUDECODE=1, which causes nested-session detection to fire and exit 1.
 							CLAUDECODE: undefined,
-							CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1",
-							CLAUDE_CODE_ENABLE_TASKS: "true",
-							CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1",
 						}).filter(([, v]) => v !== undefined),
 					) as NodeJS.ProcessEnv,
 					...(this.config.workingDirectory && {
@@ -460,7 +520,7 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 						allowedDirectories: this.config.allowedDirectories,
 					}),
 					...(processedAllowedTools && { allowedTools: processedAllowedTools }),
-					...(processedDisallowedTools && {
+					...(processedDisallowedTools.length > 0 && {
 						disallowedTools: processedDisallowedTools,
 					}),
 					...(this.canUseToolCallback && {
@@ -477,12 +537,33 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 					...(this.config.outputFormat && {
 						outputFormat: this.config.outputFormat,
 					}),
+					...(this.config.sandbox && { sandbox: this.config.sandbox }),
 					...(this.config.extraArgs && { extraArgs: this.config.extraArgs }),
+					...(pathToClaudeCodeExecutable && { pathToClaudeCodeExecutable }),
 				},
 			};
 
+			if (isDebugLogging) {
+				this.logger.debug(
+					`Claude query options: ${JSON.stringify(
+						queryOptions,
+						serializeQueryOptionsReplacer,
+						2,
+					)}`,
+				);
+			}
+
 			// Process messages from the query
-			for await (const message of query(queryOptions)) {
+			// Use pre-warmed session if available (eliminates cold-start subprocess spawn cost).
+			// warmSession.query() accepts both string and AsyncIterable<SDKUserMessage>,
+			// so promptForQuery works correctly for both start() and startStreaming().
+			if (this.config.warmSession) {
+				this.logger.debug("Using pre-warmed session for first turn");
+				this.activeQuery = this.config.warmSession.query(promptForQuery);
+			} else {
+				this.activeQuery = query(queryOptions);
+			}
+			for await (const message of this.activeQuery) {
 				if (!this.sessionInfo?.isRunning) {
 					this.logger.info("Session was stopped, breaking from query loop");
 					break;
@@ -521,23 +602,23 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 					this.writeReadableLogEntry(message);
 				}
 
-				// Emit appropriate events based on message type
-				// Defer result message emission until after loop completes to avoid race conditions
-				// where subroutine transitions start before the runner has fully cleaned up
-				if (message.type === "result") {
-					this.pendingResultMessage = message;
-					// Complete streaming prompt immediately so it stops accepting input
-					if (this.streamingPrompt) {
-						this.logger.debug(
-							"Got result message, completing streaming prompt",
-						);
-						this.streamingPrompt.complete();
-					}
-				} else {
-					this.emit("message", message);
-					this.processMessage(message);
+				// Emit all messages (including result) immediately in-loop.
+				// When keepSessionWarm is true, the streamingPrompt stays open for
+				// follow-up messages so the SDK session can be reused. Otherwise we
+				// complete the streaming prompt on result so the for-await loop exits
+				// and the subprocess can shut down (pre-warm-sessions behavior).
+				this.emit("message", message);
+				this.processMessage(message);
+				if (
+					message.type === "result" &&
+					!this.keepSessionWarm &&
+					this.streamingPrompt
+				) {
+					this.streamingPrompt.complete();
 				}
 			}
+
+			this.activeQuery = null;
 
 			// Session completed successfully - mark as not running BEFORE emitting result
 			// This ensures any code checking isRunning() during result processing sees the correct state
@@ -589,6 +670,7 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 		} finally {
 			// Clean up
 			this.abortController = null;
+			this.activeQuery = null;
 			this.pendingResultMessage = null;
 
 			// Complete and clean up streaming prompt if it exists
@@ -657,6 +739,19 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 	}
 
 	/**
+	 * Interrupt the current turn without killing the session.
+	 * The session stays warm and can accept new messages.
+	 */
+	async interrupt(): Promise<void> {
+		if (this.activeQuery) {
+			this.logger.info("Interrupting current turn");
+			await this.activeQuery.interrupt();
+		} else {
+			this.logger.debug("interrupt() called but no active query");
+		}
+	}
+
+	/**
 	 * Stop the current Claude session
 	 */
 	stop(): void {
@@ -671,6 +766,8 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 			this.streamingPrompt.complete();
 			this.streamingPrompt = null;
 		}
+
+		this.activeQuery = null;
 
 		if (this.sessionInfo) {
 			this.sessionInfo.isRunning = false;

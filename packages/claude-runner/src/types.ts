@@ -11,6 +11,7 @@ import type {
 	SDKSystemMessage,
 	SDKUserMessage,
 	SdkPluginConfig,
+	SessionStore,
 	WarmQuery,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { ILogger, OnAskUserQuestion } from "cyrus-core";
@@ -47,6 +48,18 @@ export interface ClaudeRunnerConfig {
 	};
 	hooks?: Partial<Record<HookEvent, HookCallbackMatcher[]>>; // Claude SDK hooks
 	plugins?: SdkPluginConfig[]; // Plugins providing skills, agents, hooks, and MCP servers
+	/**
+	 * Filter which Skills the main session can invoke. Passed through to the
+	 * SDK's `query()` `skills` option.
+	 * - `undefined`: no SDK auto-configuration (CLI defaults apply).
+	 * - `'all'`: enable every discovered skill.
+	 * - `string[]`: enable only the listed skills (by SKILL.md `name` /
+	 *   directory name, or `plugin:skill` for plugin-qualified skills).
+	 *
+	 * This is a context filter, not a sandbox — unlisted skills are hidden from
+	 * the model's listing but the files remain on disk.
+	 */
+	skills?: string[] | "all";
 	outputFormat?: OutputFormatConfig; // Structured output format configuration
 	sandbox?: SandboxSettings; // Sandbox settings (enabled, network proxy ports, etc.)
 	/** Additional environment variables to pass to the Claude child process (merged after process.env) */
@@ -69,6 +82,19 @@ export interface ClaudeRunnerConfig {
 	 * this warm instance instead of spawning a cold process (~20x faster first turn).
 	 */
 	warmSession?: WarmQuery;
+	/**
+	 * Optional SessionStore that mirrors transcript entries to external storage.
+	 * Forwarded to the SDK's `query()` via `options.sessionStore`. Used to ship
+	 * session JSONL to the Cyrus hosted control plane so transcripts survive
+	 * the ephemeral worktree and can be resumed from any host.
+	 */
+	sessionStore?: SessionStore;
+	/**
+	 * Custom directory path for Claude's auto-memory storage. Forwarded to the
+	 * Claude SDK as settings.autoMemoryDirectory. When unset, the SDK falls
+	 * back to its default (~/.claude/projects/<sanitized-cwd>/memory/).
+	 */
+	autoMemoryDirectory?: string;
 }
 
 export interface ClaudeSessionInfo {
@@ -101,6 +127,9 @@ export type {
 	SDKSystemMessage,
 	SDKUserMessage,
 	SdkPluginConfig,
+	SessionKey,
+	SessionStore,
+	SessionStoreEntry,
 } from "@anthropic-ai/claude-agent-sdk";
 
 // Legacy alias - JsonSchema type is now part of JsonSchemaOutputFormat['schema']

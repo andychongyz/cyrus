@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type {
 	HookCallbackMatcher,
 	HookEvent,
@@ -18,6 +19,7 @@ import type {
 	RepositoryConfig,
 	RunnerType,
 } from "cyrus-core";
+import { buildPrMarkerHook } from "./hooks/PrMarkerHook.js";
 
 /**
  * Subset of McpConfigService consumed by RunnerConfigBuilder.
@@ -70,6 +72,8 @@ export interface ChatRunnerConfigInput {
 	sessionId: string;
 	resumeSessionId?: string;
 	cyrusHome: string;
+	/** Chat platform name (e.g. "slack") — used to namespace the shared auto-memory dir */
+	platformName: string;
 	/** Linear workspace ID for building fresh MCP config at session start */
 	linearWorkspaceId?: string;
 	/** Repository to source user-configured MCP paths from (V1: first available repo) */
@@ -111,6 +115,12 @@ export interface IssueRunnerConfigInput {
 	requireLinearWorkspaceId: (repo: RepositoryConfig) => string;
 	/** Plugins to load for the session (provides skills, hooks, etc.) */
 	plugins?: SdkPluginConfig[];
+	/**
+	 * Allow-list of skill names enabled for the session (after scope filtering),
+	 * or `"all"` to enable every discovered skill, or `undefined` to defer to
+	 * provider defaults. Only the Claude runner respects this today.
+	 */
+	skills?: string[] | "all";
 	/** SDK sandbox settings (enabled, network proxy ports) for Claude runner */
 	sandboxSettings?: SandboxSettings;
 	/** CA cert path for MITM TLS termination — passed via child process env */
@@ -179,13 +189,26 @@ export class RunnerConfigBuilder {
 
 		input.logger.debug("Chat session allowed tools:", allowedTools);
 
+		// Shared auto-memory across all chat threads on this platform. Lives
+		// under cyrusHome (not the per-thread workspace) so memory built up in
+		// one Slack thread is available to every other Slack thread.
+		const autoMemoryDirectory = join(
+			input.cyrusHome,
+			`${input.platformName}-memory`,
+		);
+
 		return {
 			workingDirectory: input.workspacePath,
 			allowedTools,
 			disallowedTools: [] as string[],
-			allowedDirectories: [input.workspacePath, ...repositoryPaths],
+			allowedDirectories: [
+				input.workspacePath,
+				autoMemoryDirectory,
+				...repositoryPaths,
+			],
 			workspaceName: input.workspaceName,
 			cyrusHome: input.cyrusHome,
+			autoMemoryDirectory,
 			appendSystemPrompt: input.systemPrompt,
 			...(mcpConfig ? { mcpConfig } : {}),
 			...(mcpConfigPath ? { mcpConfigPath } : {}),
@@ -211,11 +234,20 @@ export class RunnerConfigBuilder {
 	} {
 		const log = input.logger;
 
-		// Configure hooks: PreToolUse for skill context injection + PostToolUse for screenshots + Stop
+		// Configure hooks: PreToolUse for skill context injection + PostToolUse for screenshots
+		// + PR-marker enforcement, plus the Stop hook that blocks the session when work is unshipped.
 		const screenshotHooks = this.buildScreenshotHooks(log);
+		const prMarkerHook = buildPrMarkerHook(log);
 		const stopHook = this.buildStopHook(log);
 		const verifyAndShipHook = this.buildVerifyAndShipContextHook(input);
-		const hooks = { ...screenshotHooks, ...stopHook, ...verifyAndShipHook };
+		const hooks: Partial<Record<HookEvent, HookCallbackMatcher[]>> = {
+			...stopHook,
+			...verifyAndShipHook,
+			PostToolUse: [
+				...(screenshotHooks.PostToolUse ?? []),
+				...(prMarkerHook.PostToolUse ?? []),
+			],
+		};
 
 		// Determine runner type and model override from selectors
 		const runnerSelection = this.runnerSelector.determineRunnerSelection(
@@ -294,6 +326,11 @@ export class RunnerConfigBuilder {
 			// Plugins providing skills (Claude runner only)
 			...(runnerType === "claude" &&
 				input.plugins?.length && { plugins: input.plugins }),
+			// Skill scope allow-list (Claude runner only). Passed through to the
+			// SDK's `query()` `skills` option so unlisted skills are hidden from
+			// the model.
+			...(runnerType === "claude" &&
+				input.skills !== undefined && { skills: input.skills }),
 			// SDK sandbox settings (Claude runner only):
 			// - Merge base settings with per-session filesystem.allowWrite (worktree path)
 			// - Pass CA cert path via env for MITM TLS termination
@@ -314,21 +351,20 @@ export class RunnerConfigBuilder {
 			onError: input.onError,
 		};
 
-		// Cursor runner-specific wiring for offline/headless harness
+		// Cursor runner uses @cursor/sdk. Pass through API key, the same
+		// sandboxSettings shape Claude consumes (the runner translates it to
+		// Cursor's `.cursor/sandbox.json` schema), and the egress CA bundle
+		// path for MITM TLS trust in sandboxed children. SDK ≥1.0.11
+		// auto-discovers the bundled `cursorsandbox` helper from the
+		// platform-specific optionalDependency.
 		if (runnerType === "cursor") {
-			const approvalPolicy = (process.env.CYRUS_APPROVAL_POLICY || "never") as
-				| "never"
-				| "on-request"
-				| "on-failure"
-				| "untrusted";
-			config.cursorPath =
-				process.env.CURSOR_AGENT_PATH || process.env.CURSOR_PATH || undefined;
 			config.cursorApiKey = process.env.CURSOR_API_KEY || undefined;
-			config.askForApproval = approvalPolicy;
-			config.approveMcps = true;
-			config.sandbox = (process.env.CYRUS_SANDBOX || "enabled") as
-				| "enabled"
-				| "disabled";
+			if (input.sandboxSettings) {
+				config.sandboxSettings = input.sandboxSettings;
+			}
+			if (input.egressCaCertPath) {
+				config.egressCaCertPath = input.egressCaCertPath;
+			}
 		}
 
 		if (input.resumeSessionId) {
@@ -343,40 +379,16 @@ export class RunnerConfigBuilder {
 	}
 
 	/**
-	 * Build a Stop hook that ensures the agent creates a PR and posts a summary
-	 * before ending the session. Uses the `stop_hook_active` flag to prevent
-	 * infinite loops — on the first stop attempt it blocks with guidance,
-	 * on subsequent attempts (where the hook already fired) it allows the stop.
+	 * Build a Stop hook that reminds the agent to commit, push, and open a PR
+	 * before ending the session. Blocks the first stop attempt and feeds the
+	 * guidance back to the agent via the SDK's native `decision: "block"` +
+	 * `reason` mechanism. The `stop_hook_active` flag prevents infinite loops —
+	 * once the hook has already fired, the next stop is always allowed through.
 	 */
 	private buildStopHook(
 		_log: ILogger,
 	): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
-		return {
-			Stop: [
-				{
-					matcher: ".*",
-					hooks: [
-						async (input) => {
-							const stopInput = input as StopHookInput;
-
-							// CRITICAL: Prevent infinite loops — if the stop hook already
-							// fired once and the agent is trying to stop again, let it through.
-							if (stopInput.stop_hook_active) {
-								return { continue: false };
-							}
-
-							// Block the first stop attempt and guide the agent to create a PR and summary
-							return {
-								continue: true,
-								additionalContext:
-									"Before stopping, ensure you have committed and pushed all code changes and created/updated a PR (if you made any code changes).\n\n" +
-									"If you have already done this (or no code changes were made), you may stop again.",
-							};
-						},
-					],
-				},
-			],
-		};
+		return buildStopHook();
 	}
 
 	private static readonly VERIFY_AND_SHIP_SKILL = "verify-and-ship";
@@ -587,4 +599,41 @@ export class RunnerConfigBuilder {
 			],
 		};
 	}
+}
+
+/**
+ * Build a Stop hook that reminds the agent to commit, push, and open a PR
+ * before ending the session. Blocks the first stop attempt and feeds the
+ * guidance back to the agent via the SDK's native `decision: "block"` +
+ * `reason` mechanism. The `stop_hook_active` flag prevents infinite loops —
+ * once the hook has already fired, the next stop is always allowed through.
+ */
+export function buildStopHook(): Partial<
+	Record<HookEvent, HookCallbackMatcher[]>
+> {
+	return {
+		Stop: [
+			{
+				matcher: ".*",
+				hooks: [
+					async (input) => {
+						const stopInput = input as StopHookInput;
+
+						// Prevent infinite loops: if the hook already fired, allow the stop.
+						if (stopInput.stop_hook_active) {
+							return {};
+						}
+
+						return {
+							decision: "block",
+							reason:
+								"Before stopping, ensure you have committed and pushed all code changes " +
+								"and created/updated a PR (if you made any code changes).\n\n" +
+								"If you have already done this (or no code changes were made), you may stop again.",
+						};
+					},
+				],
+			},
+		],
+	};
 }

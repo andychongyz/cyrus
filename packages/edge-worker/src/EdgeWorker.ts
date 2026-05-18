@@ -8,11 +8,13 @@ import { LinearClient } from "@linear/sdk";
 import type {
 	McpServerConfig,
 	SDKMessage,
+	SessionStore,
 	WarmQuery,
 } from "cyrus-claude-runner";
 import {
 	buildBaseSessionEnv,
 	ClaudeRunner,
+	HttpSessionStore,
 	normalizeMcpHttpTransport,
 } from "cyrus-claude-runner";
 import { CodexRunner } from "cyrus-codex-runner";
@@ -163,7 +165,10 @@ import {
 import { RunnerConfigBuilder } from "./RunnerConfigBuilder.js";
 import { RunnerSelectionService } from "./RunnerSelectionService.js";
 import { SharedApplicationServer } from "./SharedApplicationServer.js";
-import { SkillsPluginResolver } from "./SkillsPluginResolver.js";
+import {
+	type SkillSessionContext,
+	SkillsPluginResolver,
+} from "./SkillsPluginResolver.js";
 import { SlackChatAdapter } from "./SlackChatAdapter.js";
 import type { IActivitySink } from "./sinks/IActivitySink.js";
 import { LinearActivitySink } from "./sinks/LinearActivitySink.js";
@@ -255,6 +260,14 @@ export class EdgeWorker extends EventEmitter {
 	/** CA cert path for MITM TLS termination (passed per-session env, not process.env) */
 	private egressCaCertPath: string | null = null;
 	/**
+	 * Remote SessionStore that mirrors Claude SDK transcripts to the Cyrus
+	 * hosted control plane. Enabled when all three of `CYRUS_APP_URL`,
+	 * `CYRUS_API_KEY`, and `CYRUS_TEAM_ID` are set — used by any Claude
+	 * runner spawned from this worker so transcripts survive ephemeral
+	 * worktrees and are resumable from any host.
+	 */
+	private claudeSessionStore: SessionStore | null = null;
+	/**
 	 * Tracks recently processed issue-update webhook keys to prevent
 	 * duplicate deliveries from Linear's at-least-once delivery.
 	 * Key format: `${createdAt}:${issueId}`
@@ -303,6 +316,43 @@ export class EdgeWorker extends EventEmitter {
 		this.persistenceManager = new PersistenceManager(
 			join(this.cyrusHome, "state"),
 		);
+
+		// Mirror Claude SDK session transcripts to the hosted control plane
+		// when CYRUS_APP_URL (destination), CYRUS_API_KEY (proof of team
+		// ownership), and CYRUS_TEAM_ID (which team the transcripts belong to)
+		// are all configured. If any is missing the store stays null and the
+		// SDK falls back to local JSONL only. Operators can also opt out
+		// explicitly by setting CYRUS_DISABLE_REMOTE_SESSION_STORE=1, which
+		// keeps transcripts local even when the three vars above are present.
+		const sessionStoreBaseUrl = process.env.CYRUS_APP_URL;
+		const sessionStoreApiKey = process.env.CYRUS_API_KEY;
+		const sessionStoreTeamId = process.env.CYRUS_TEAM_ID;
+		const sessionStoreDisabled = this.isRemoteSessionStoreDisabled();
+		if (
+			!sessionStoreDisabled &&
+			sessionStoreBaseUrl &&
+			sessionStoreApiKey &&
+			sessionStoreTeamId
+		) {
+			this.claudeSessionStore = new HttpSessionStore({
+				baseUrl: sessionStoreBaseUrl,
+				apiKey: sessionStoreApiKey,
+				teamId: sessionStoreTeamId,
+				logger: this.logger,
+			});
+			this.logger.info(
+				`[SessionStore] Mirroring Claude sessions to ${sessionStoreBaseUrl} for team ${sessionStoreTeamId}`,
+			);
+		} else if (
+			sessionStoreDisabled &&
+			sessionStoreBaseUrl &&
+			sessionStoreApiKey &&
+			sessionStoreTeamId
+		) {
+			this.logger.info(
+				"[SessionStore] Remote session store disabled via CYRUS_DISABLE_REMOTE_SESSION_STORE; transcripts will stay local.",
+			);
+		}
 
 		// Initialize GitHub comment service for posting replies to GitHub PRs
 		this.gitHubCommentService = new GitHubCommentService();
@@ -2342,6 +2392,72 @@ ${taskSection}`;
 	}
 
 	/**
+	 * Test-only: dispatch a synthetic Slack webhook event through the chat
+	 * session handler. Used by the F1 test harness to exercise the Slack →
+	 * ClaudeRunner code path end-to-end without a real Slack signature.
+	 */
+	async dispatchChatTestEvent(event: SlackWebhookEvent): Promise<void> {
+		if (!this.chatSessionHandler) {
+			throw new Error("chatSessionHandler not initialized");
+		}
+		await this.chatSessionHandler.handleEvent(event);
+	}
+
+	/**
+	 * Public accessor for the shared Fastify-based application server.
+	 * Used by F1 to register test-only routes alongside production webhook routes.
+	 */
+	getSharedApplicationServer(): SharedApplicationServer {
+		return this.sharedApplicationServer;
+	}
+
+	/**
+	 * Test-only: list active chat threads (threadKey → sessionId).
+	 */
+	listChatThreads(): Array<{ threadKey: string; sessionId: string }> {
+		if (!this.chatSessionHandler) return [];
+		return this.chatSessionHandler.listThreads();
+	}
+
+	/**
+	 * Test-only: fetch the last assistant text reply for a chat thread.
+	 * Returns null when the thread or runner is unknown, or no assistant
+	 * message has been produced yet.
+	 */
+	getChatThreadLastReply(threadKey: string): {
+		text: string;
+		isRunning: boolean;
+		messageCount: number;
+	} | null {
+		if (!this.chatSessionHandler) return null;
+		const runner = this.chatSessionHandler.getRunnerForThread(threadKey);
+		if (!runner) return null;
+		const messages = runner.getMessages();
+		const lastAssistant = [...messages]
+			.reverse()
+			.find((m) => m.type === "assistant");
+		let text = "";
+		if (
+			lastAssistant &&
+			lastAssistant.type === "assistant" &&
+			"message" in lastAssistant
+		) {
+			const msg = lastAssistant as {
+				message: { content: Array<{ type: string; text?: string }> };
+			};
+			const block = msg.message.content?.find(
+				(b) => b.type === "text" && b.text,
+			);
+			if (block?.text) text = block.text;
+		}
+		return {
+			text,
+			isRunning: runner.isRunning(),
+			messageCount: messages.length,
+		};
+	}
+
+	/**
 	 * Stop the edge worker
 	 */
 	async stop(): Promise<void> {
@@ -2920,6 +3036,15 @@ ${taskSection}`;
 	): Promise<void> {
 		// Track active webhook processing for status endpoint
 		this.activeWebhookCount++;
+
+		const webhookAction = (webhook as { action?: string }).action;
+		const webhookType = (webhook as { type?: string }).type;
+		this.logger.event("webhook_received", {
+			source: "linear",
+			action: webhookAction,
+			type: webhookType,
+			repoCount: repos.length,
+		});
 
 		// Log verbose webhook info if enabled
 		if (process.env.CYRUS_WEBHOOK_DEBUG === "true") {
@@ -4399,6 +4524,7 @@ ${taskSection}`;
 						undefined, // maxTurns
 						undefined, // mcpOptions
 						linearWorkspaceId,
+						this.buildSkillSessionContext(primaryRepo, fullIssue),
 					);
 
 				log.debug(
@@ -4511,31 +4637,38 @@ ${taskSection}`;
 		const issueTitle = issue?.title || "this issue";
 		const senderName = webhook.agentSession.creator?.name || "user";
 
-		if (isDoubleStop) {
-			// Second stop within window — full kill
+		// Only warm sessions can be safely interrupted without killing the
+		// underlying request. Non-warm sessions get a single-shot full stop —
+		// calling interrupt() on them surfaces a "Request was aborted" error
+		// from the SDK (see CYPACK-1145).
+		const supportsInterrupt = Boolean(
+			existingRunner?.interrupt && existingRunner?.isWarm?.(),
+		);
+
+		if (isDoubleStop || !supportsInterrupt) {
+			// Either a second stop within window, or a non-warm runner — full kill
 			this.agentSessionManager.requestSessionStop(agentSessionId);
 			if (existingRunner) {
 				existingRunner.stop();
-				log.info(`Double-stop: fully aborted session ${agentSessionId}`);
+				log.info(
+					isDoubleStop
+						? `Double-stop: fully aborted session ${agentSessionId}`
+						: `Stopped session ${agentSessionId} (interrupt not supported)`,
+				);
 			}
 			this.lastStopTimeBySession.delete(agentSessionId);
 			await this.agentSessionManager.createResponseActivity(
 				agentSessionId,
-				`I've fully stopped working on ${issueTitle}.\n\n**Stop Signal:** Received from ${senderName} (second stop)\n**Action Taken:** Session terminated`,
+				isDoubleStop
+					? `I've fully stopped working on ${issueTitle}.\n\n**Stop Signal:** Received from ${senderName} (second stop)\n**Action Taken:** Session terminated`
+					: `I've stopped working on ${issueTitle}.\n\n**Stop Signal:** Received from ${senderName}\n**Action Taken:** Session terminated`,
 			);
 		} else {
-			// First stop — interrupt current turn, keep session warm
-			if (existingRunner?.interrupt) {
-				await existingRunner.interrupt();
-				log.info(
-					`Interrupted current turn for session ${agentSessionId} (send stop again within 10s to fully terminate)`,
-				);
-			} else if (existingRunner) {
-				// Runner doesn't support interrupt — fall back to full stop
-				this.agentSessionManager.requestSessionStop(agentSessionId);
-				existingRunner.stop();
-				log.info(`Stopped session ${agentSessionId} (no interrupt support)`);
-			}
+			// First stop on a warm session — interrupt current turn, keep session warm
+			await existingRunner!.interrupt!();
+			log.info(
+				`Interrupted current turn for session ${agentSessionId} (send stop again within 10s to fully terminate)`,
+			);
 			await this.agentSessionManager.createResponseActivity(
 				agentSessionId,
 				`Interrupted by ${senderName}\n**Tip:** Type and send "stop" within 10 seconds to fully terminate the session.`,
@@ -5190,6 +5323,34 @@ ${taskSection}`;
 	}
 
 	/**
+	 * Build the session context used to evaluate per-skill scope restrictions.
+	 *
+	 * Skill scopes (persisted in `scope.json` sidecars by the config-updater)
+	 * match against:
+	 * - the active repository's Cyrus config ID,
+	 * - the Linear team that owns the issue, and
+	 * - the Linear label IDs attached to the issue.
+	 */
+	private buildSkillSessionContext(
+		repository: RepositoryConfig,
+		fullIssue?: Issue,
+	): SkillSessionContext {
+		const context: SkillSessionContext = {
+			repositoryId: repository.id,
+		};
+		if (fullIssue?.teamId) {
+			context.linearTeamId = fullIssue.teamId;
+		}
+		if (
+			Array.isArray(fullIssue?.labelIds) &&
+			(fullIssue?.labelIds?.length ?? 0) > 0
+		) {
+			context.linearLabelIds = [...(fullIssue?.labelIds ?? [])];
+		}
+		return context;
+	}
+
+	/**
 	 * Resolve default model for a given runner from config with sensible built-in defaults.
 	 * Supports legacy config keys for backwards compatibility.
 	 */
@@ -5215,8 +5376,14 @@ ${taskSection}`;
 		config: AgentRunnerConfig,
 	): IAgentRunner {
 		switch (runnerType) {
-			case "claude":
-				return new ClaudeRunner(config, this.isWarmSessionsEnabled());
+			case "claude": {
+				// Inject the hosted SessionStore at the last moment so it only
+				// attaches to Claude runners (the field is Claude-specific).
+				const claudeConfig = this.claudeSessionStore
+					? { ...config, sessionStore: this.claudeSessionStore }
+					: config;
+				return new ClaudeRunner(claudeConfig, this.isWarmSessionsEnabled());
+			}
 			case "gemini":
 				return new GeminiRunner(config);
 			case "codex":
@@ -5923,8 +6090,18 @@ ${taskSection}`;
 			systemPrompt = sharedInstructions;
 		}
 
-		// 3. Append skills guidance — instruct the agent to use skills based on context
-		systemPrompt += await this.skillsPluginResolver.buildSkillsGuidance();
+		// 3. Append skills guidance — instruct the agent to use skills based on context.
+		// Skills hidden by per-skill scope (repo / Linear team / Linear label) are
+		// omitted from the guidance so the model doesn't reference skills it
+		// cannot invoke.
+		const skillsContext = this.buildSkillSessionContext(
+			repositories[0]!,
+			input.fullIssue,
+		);
+		systemPrompt += await this.skillsPluginResolver.buildSkillsGuidance(
+			undefined,
+			skillsContext,
+		);
 
 		// 3.5. If the user explicitly classified this as a question, force investigate skill
 		if (input.isQuestion) {
@@ -6204,12 +6381,25 @@ ${input.userComment}
 		maxTurns?: number,
 		mcpOptions?: { excludeSlackMcp?: boolean },
 		linearWorkspaceId?: string,
+		skillContext?: SkillSessionContext,
 	): Promise<{ config: AgentRunnerConfig; runnerType: RunnerType }> {
 		const log = this.logger.withContext({
 			sessionId,
 			platform: session.issueContext?.trackerId,
 			issueIdentifier: session.issueContext?.issueIdentifier,
 		});
+
+		// Resolve plugins once so we can also derive the per-session scoped
+		// skill allow-list from the same filesystem snapshot.
+		const plugins = await this.skillsPluginResolver.resolve();
+		const resolvedSkillContext: SkillSessionContext = skillContext ?? {
+			repositoryId: repository.id,
+		};
+		const allowedSkillNames =
+			await this.skillsPluginResolver.discoverSkillNames(
+				plugins,
+				resolvedSkillContext,
+			);
 
 		const result = this.runnerConfigBuilder.buildIssueConfig({
 			session,
@@ -6227,7 +6417,8 @@ ${input.userComment}
 			linearWorkspaceId,
 			cyrusHome: this.cyrusHome,
 			logger: log,
-			plugins: await this.skillsPluginResolver.resolve(),
+			plugins,
+			skills: allowedSkillNames,
 			sandboxSettings: this.sdkSandboxSettings ?? undefined,
 			egressCaCertPath: this.egressCaCertPath ?? undefined,
 			onMessage: (message: SDKMessage) => {
@@ -6434,6 +6625,22 @@ ${input.userComment}
 	 */
 	private isWarmSessionsEnabled(): boolean {
 		const raw = process.env.CYRUS_ENABLE_WARM_SESSIONS;
+		if (!raw) return false;
+		const v = raw.toLowerCase().trim();
+		return v === "1" || v === "true";
+	}
+
+	/**
+	 * Whether the remote Claude session store is explicitly disabled.
+	 *
+	 * The remote store mirrors SDK transcripts to the Cyrus hosted control
+	 * plane and is on by default whenever `CYRUS_APP_URL`, `CYRUS_API_KEY`,
+	 * and `CYRUS_TEAM_ID` are all set. Operators can opt out — without
+	 * unsetting those vars (which other features depend on) — by setting
+	 * `CYRUS_DISABLE_REMOTE_SESSION_STORE=1` (or `=true`).
+	 */
+	private isRemoteSessionStoreDisabled(): boolean {
+		const raw = process.env.CYRUS_DISABLE_REMOTE_SESSION_STORE;
 		if (!raw) return false;
 		const v = raw.toLowerCase().trim();
 		return v === "1" || v === "true";
@@ -6964,6 +7171,7 @@ ${input.userComment}
 				maxTurns, // Pass maxTurns if specified
 				undefined, // mcpOptions
 				resolvedWorkspaceId,
+				this.buildSkillSessionContext(repository, fullIssue),
 			);
 
 		// Create the appropriate runner based on session state

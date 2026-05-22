@@ -107,17 +107,14 @@ describe("BranchElicitationHandler", () => {
 	});
 
 	describe("shouldElicit", () => {
-		it("should return true when no hotfix-related labels present and rules file exists", () => {
-			expect(handler.shouldElicit(["feature", "enhancement"], "repo-1")).toBe(
-				true,
-			);
+		it("should return true when no auto-resolvable labels present and rules file exists", () => {
 			expect(handler.shouldElicit([], "repo-1")).toBe(true);
 			expect(handler.shouldElicit(["bug", "p1"], "repo-1")).toBe(true);
 		});
 
 		it("should return false when no BRANCHING_RULES.md file exists", () => {
 			vi.mocked(existsSync).mockReturnValueOnce(false);
-			expect(handler.shouldElicit(["feature"], "no-rules-repo")).toBe(false);
+			expect(handler.shouldElicit(["bug"], "no-rules-repo")).toBe(false);
 		});
 
 		it('should return false when "hotfix" label is present', () => {
@@ -136,6 +133,30 @@ describe("BranchElicitationHandler", () => {
 		it('should return false when "production" label is present', () => {
 			expect(handler.shouldElicit(["production"], "repo-1")).toBe(false);
 		});
+
+		it('should return false when "feature" label is present', () => {
+			expect(handler.shouldElicit(["feature"], "repo-1")).toBe(false);
+		});
+
+		it('should return false when "enhancement" label is present', () => {
+			expect(handler.shouldElicit(["enhancement"], "repo-1")).toBe(false);
+		});
+
+		it('should return false when "improvement" label is present', () => {
+			expect(handler.shouldElicit(["improvement"], "repo-1")).toBe(false);
+		});
+
+		it('should return false when "question" label is present', () => {
+			expect(handler.shouldElicit(["question"], "repo-1")).toBe(false);
+		});
+
+		it('should return false when "research" label is present', () => {
+			expect(handler.shouldElicit(["research"], "repo-1")).toBe(false);
+		});
+
+		it('should return false when "investigate" label is present', () => {
+			expect(handler.shouldElicit(["investigate"], "repo-1")).toBe(false);
+		});
 	});
 
 	describe("hasHotfixLabel", () => {
@@ -149,6 +170,40 @@ describe("BranchElicitationHandler", () => {
 		it("should return false for non-hotfix labels", () => {
 			expect(handler.hasHotfixLabel(["feature", "enhancement"])).toBe(false);
 			expect(handler.hasHotfixLabel([])).toBe(false);
+		});
+	});
+
+	describe("hasFeatureLabel", () => {
+		it("should return true for feature-related labels", () => {
+			expect(handler.hasFeatureLabel(["feature"])).toBe(true);
+			expect(handler.hasFeatureLabel(["enhancement"])).toBe(true);
+			expect(handler.hasFeatureLabel(["improvement"])).toBe(true);
+		});
+
+		it("should return true when mixed with other labels", () => {
+			expect(handler.hasFeatureLabel(["bug", "feature"])).toBe(true);
+		});
+
+		it("should return false for non-feature labels", () => {
+			expect(handler.hasFeatureLabel(["hotfix", "urgent"])).toBe(false);
+			expect(handler.hasFeatureLabel([])).toBe(false);
+		});
+	});
+
+	describe("hasQuestionLabel", () => {
+		it("should return true for question-related labels", () => {
+			expect(handler.hasQuestionLabel(["question"])).toBe(true);
+			expect(handler.hasQuestionLabel(["research"])).toBe(true);
+			expect(handler.hasQuestionLabel(["investigate"])).toBe(true);
+		});
+
+		it("should return true when mixed with other labels", () => {
+			expect(handler.hasQuestionLabel(["bug", "question"])).toBe(true);
+		});
+
+		it("should return false for non-question labels", () => {
+			expect(handler.hasQuestionLabel(["feature", "enhancement"])).toBe(false);
+			expect(handler.hasQuestionLabel([])).toBe(false);
 		});
 	});
 
@@ -171,6 +226,52 @@ describe("BranchElicitationHandler", () => {
 				isQuestion: false,
 				baseBranch: "master",
 				prefix: "hotfix",
+			});
+		});
+	});
+
+	describe("resolveAutoFeature", () => {
+		it("should return normal/feature branch config", async () => {
+			const choice = await handler.resolveAutoFeature("repo-1");
+			expect(choice).toEqual({
+				isHotfix: false,
+				isQuestion: false,
+				baseBranch: "develop",
+				prefix: "feature",
+			});
+		});
+
+		it("should return defaults when no rules file exists", async () => {
+			vi.mocked(existsSync).mockReturnValueOnce(false);
+			const choice = await handler.resolveAutoFeature("non-existent-repo");
+			expect(choice).toEqual({
+				isHotfix: false,
+				isQuestion: false,
+				baseBranch: "develop",
+				prefix: "feature",
+			});
+		});
+	});
+
+	describe("resolveAutoQuestion", () => {
+		it("should return question mode with normal branch config", async () => {
+			const choice = await handler.resolveAutoQuestion("repo-1");
+			expect(choice).toEqual({
+				isHotfix: false,
+				isQuestion: true,
+				baseBranch: "develop",
+				prefix: "feature",
+			});
+		});
+
+		it("should return defaults when no rules file exists", async () => {
+			vi.mocked(existsSync).mockReturnValueOnce(false);
+			const choice = await handler.resolveAutoQuestion("non-existent-repo");
+			expect(choice).toEqual({
+				isHotfix: false,
+				isQuestion: true,
+				baseBranch: "develop",
+				prefix: "feature",
 			});
 		});
 	});

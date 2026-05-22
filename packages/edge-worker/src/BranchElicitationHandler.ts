@@ -93,6 +93,8 @@ export interface BranchElicitationHandlerDeps {
 // ── Constants ───────────────────────────────────────────────────────
 
 const HOTFIX_LABELS = ["hotfix", "urgent", "critical", "production"];
+const FEATURE_LABELS = ["feature", "enhancement", "improvement"];
+const QUESTION_LABELS = ["question", "research", "investigate"];
 
 /** Hardcoded "Question" option appended to every elicitation. Not parsed from BRANCHING_RULES.md. */
 const QUESTION_OPTION: ParsedBranchOption = {
@@ -175,7 +177,7 @@ export class BranchElicitationHandler {
 	 *
 	 * Returns `true` only when:
 	 * 1. A BRANCHING_RULES.md file exists for the repo (opt-in gate)
-	 * 2. No hotfix-related label is present on the issue
+	 * 2. No auto-resolvable label is present (hotfix, feature, or question)
 	 */
 	shouldElicit(lowercaseLabels: readonly string[], repoId: string): boolean {
 		const filePath = join(
@@ -189,7 +191,11 @@ export class BranchElicitationHandler {
 			return false;
 		}
 
-		return !lowercaseLabels.some((label) => HOTFIX_LABELS.includes(label));
+		return (
+			!this.hasHotfixLabel(lowercaseLabels) &&
+			!this.hasFeatureLabel(lowercaseLabels) &&
+			!this.hasQuestionLabel(lowercaseLabels)
+		);
 	}
 
 	/**
@@ -197,6 +203,20 @@ export class BranchElicitationHandler {
 	 */
 	hasHotfixLabel(lowercaseLabels: readonly string[]): boolean {
 		return lowercaseLabels.some((label) => HOTFIX_LABELS.includes(label));
+	}
+
+	/**
+	 * Check whether the labels indicate a feature (regardless of rules file).
+	 */
+	hasFeatureLabel(lowercaseLabels: readonly string[]): boolean {
+		return lowercaseLabels.some((label) => FEATURE_LABELS.includes(label));
+	}
+
+	/**
+	 * Check whether the labels indicate a question/research request (regardless of rules file).
+	 */
+	hasQuestionLabel(lowercaseLabels: readonly string[]): boolean {
+		return lowercaseLabels.some((label) => QUESTION_LABELS.includes(label));
 	}
 
 	/**
@@ -211,6 +231,36 @@ export class BranchElicitationHandler {
 			isQuestion: false,
 			baseBranch: hotfix.baseBranch,
 			prefix: hotfix.prefix,
+		};
+	}
+
+	/**
+	 * Resolve the branch choice for an issue that already has a feature label.
+	 * Skips the question — returns the normal/feature branch config immediately.
+	 */
+	async resolveAutoFeature(repoId: string): Promise<BranchElicitationChoice> {
+		const elicitation = await this.parseElicitation(repoId);
+		const normal = elicitation.options[1];
+		return {
+			isHotfix: false,
+			isQuestion: false,
+			baseBranch: normal.baseBranch,
+			prefix: normal.prefix,
+		};
+	}
+
+	/**
+	 * Resolve the branch choice for an issue that already has a question label.
+	 * Skips the question — returns question mode with normal branch config.
+	 */
+	async resolveAutoQuestion(repoId: string): Promise<BranchElicitationChoice> {
+		const elicitation = await this.parseElicitation(repoId);
+		const normal = elicitation.options[1];
+		return {
+			isHotfix: false,
+			isQuestion: true,
+			baseBranch: normal.baseBranch,
+			prefix: normal.prefix,
 		};
 	}
 

@@ -4279,6 +4279,7 @@ ${taskSection}`;
 
 		let branchPrefixOverrides: Map<string, string> | undefined;
 		let isHotfixBranch = false;
+		let isQuestionMode = false;
 
 		if (this.branchElicitationHandler.hasHotfixLabel(earlyLowercaseLabels)) {
 			// Hotfix label found — auto-resolve without asking (uses branching rules if available)
@@ -4296,6 +4297,39 @@ ${taskSection}`;
 			baseBranchOverrides = elicitResult.baseBranchOverrides;
 			branchPrefixOverrides = elicitResult.branchPrefixOverrides;
 			isHotfixBranch = true;
+		} else if (
+			this.branchElicitationHandler.hasFeatureLabel(earlyLowercaseLabels)
+		) {
+			// Feature label found — auto-resolve to normal/feature branch
+			const featureChoice =
+				await this.branchElicitationHandler.resolveAutoFeature(primaryRepoId);
+			log.info(
+				`Feature label detected, auto-resolving branch: ${featureChoice.baseBranch} with prefix ${featureChoice.prefix}`,
+			);
+			const elicitResult = this.applyBranchElicitationChoice(
+				featureChoice,
+				repositories,
+				baseBranchOverrides,
+				branchPrefixOverrides,
+			);
+			baseBranchOverrides = elicitResult.baseBranchOverrides;
+			branchPrefixOverrides = elicitResult.branchPrefixOverrides;
+		} else if (
+			this.branchElicitationHandler.hasQuestionLabel(earlyLowercaseLabels)
+		) {
+			// Question label found — auto-resolve to question mode
+			const questionChoice =
+				await this.branchElicitationHandler.resolveAutoQuestion(primaryRepoId);
+			log.info(`Question label detected, auto-resolving to question mode`);
+			const elicitResult = this.applyBranchElicitationChoice(
+				questionChoice,
+				repositories,
+				baseBranchOverrides,
+				branchPrefixOverrides,
+			);
+			baseBranchOverrides = elicitResult.baseBranchOverrides;
+			branchPrefixOverrides = elicitResult.branchPrefixOverrides;
+			isQuestionMode = true;
 		} else if (branchElicitationChoice) {
 			// Branch elicitation choice was provided (from webhook response)
 			log.info(
@@ -4316,8 +4350,8 @@ ${taskSection}`;
 				primaryRepoId,
 			)
 		) {
-			// No hotfix label, branching rules exist, no prior choice — ask the user
-			log.info("No hotfix label found, eliciting branch choice from user");
+			// No recognized label, branching rules exist, no prior choice — ask the user
+			log.info("No recognized label found, eliciting branch choice from user");
 			// Fire-and-forget: the promise resolves when user responds via webhook.
 			// We store the resume context so handleBranchElicitationResponse can
 			// continue initializeAgentRunner.
@@ -4394,7 +4428,8 @@ ${taskSection}`;
 				isStreaming: false, // Not yet streaming
 				isMentionTriggered: isMentionTriggered || false,
 				isLabelBasedPromptRequested: isLabelBasedPromptRequested || false,
-				isQuestion: branchElicitationChoice?.isQuestion || false,
+				isQuestion:
+					isQuestionMode || branchElicitationChoice?.isQuestion || false,
 				resolvedBaseBranches: sessionData.workspace.resolvedBaseBranches,
 				linearWorkspaceId,
 			};

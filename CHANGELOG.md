@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+
+### Added
+- On Cyrus-managed cloud runtimes, the agent now knows that missing system packages should be added via the dashboard: when the `CYRUS_CLOUD_RUNTIME` environment variable is set to `true`, a system-prompt addendum tells the agent to direct users to https://app.atcyrus.com/settings/packages to install missing `apt`/`npm` packages rather than installing them ad-hoc (off by default for self-host). ([CYPACK-1266](https://linear.app/ceedar/issue/CYPACK-1266), [#1272](https://github.com/cyrusagents/cyrus/pull/1272))
+
 ## [0.2.61] - 2026-06-01
 
 ### Security

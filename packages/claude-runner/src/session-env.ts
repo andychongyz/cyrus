@@ -65,6 +65,11 @@ export function buildBaseSessionEnv(
 		}
 	}
 
+	// Never forward ANTHROPIC_BASE_URL — it can leak from the parent process
+	// (e.g. a stale local proxy) and redirect Claude sessions away from the
+	// real API. Claude Code sessions use OAuth and don't need a custom base URL.
+	delete env.ANTHROPIC_BASE_URL;
+
 	return {
 		...env,
 		...CYRUS_SESSION_ENV,

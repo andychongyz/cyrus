@@ -664,10 +664,14 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 							// When logging at DEBUG level, enable the SDK's own debug output so
 							// --debug-to-stderr and DEBUG=1 propagate to the Claude subprocess.
 							...(isDebugLogging && { DEBUG_CLAUDE_AGENT_SDK: "1" }),
-							// Always exclude ANTHROPIC_API_KEY from Claude runner sessions.
-							// The API key is only needed for direct API calls (BranchRulesResolver,
-							// ProcedureAnalyzer), not for Claude Code sessions which use OAuth.
+							// Always exclude ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL from
+							// Claude runner sessions. The API key is only needed for direct
+							// API calls (BranchRulesResolver, ProcedureAnalyzer), not for
+							// Claude Code sessions which use OAuth. ANTHROPIC_BASE_URL can
+							// leak from the parent process and redirect sessions to a stale
+							// local proxy.
 							ANTHROPIC_API_KEY: undefined,
+							ANTHROPIC_BASE_URL: undefined,
 							// Unset CLAUDECODE so the spawned Claude process does not reject startup.
 							// If cyrus-agent was started inside a Claude Code session it inherits
 							// CLAUDECODE=1, which causes nested-session detection to fire and exit 1.

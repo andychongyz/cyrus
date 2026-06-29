@@ -62,7 +62,7 @@ export class RunnerSelectionService {
 			return this.config.geminiDefaultModel || "gemini-2.5-pro";
 		}
 		if (runnerType === "cursor") {
-			return this.config.cursorDefaultModel || "composer-2";
+			return this.config.cursorDefaultModel || "composer-2.5";
 		}
 		return this.config.codexDefaultModel || "gpt-5.3-codex";
 	}

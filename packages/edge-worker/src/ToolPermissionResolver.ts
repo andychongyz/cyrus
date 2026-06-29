@@ -178,7 +178,7 @@ export class ToolPermissionResolver {
 		}
 		// 3. Repository-level allowed tools
 		if (repository.allowedTools) {
-			return repository.allowedTools;
+			return this.resolveToolPreset(repository.allowedTools);
 		}
 		// 4. Global default allowed tools
 		if (this.config.defaultAllowedTools) {

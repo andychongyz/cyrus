@@ -4,6 +4,91 @@ This changelog documents internal development changes, refactors, tooling update
 
 ## [Unreleased]
 
+_No internal-only changes._
+
+## [0.2.66] - 2026-06-19
+
+### Security
+- Patched open CLI security advisories and documented the F1 dependency smoke validation. Direct bumps were used where available, with root overrides retained only for vulnerable transitives whose owning packages are already at their current npm latest. ([CYPACK-1334](https://linear.app/ceedar/issue/CYPACK-1334), [#1330](https://github.com/cyrusagents/cyrus/pull/1330))
+
+## [0.2.65] - 2026-06-11
+
+### Added
+- F1 release smoke validating the v0.2.65 release branch can start the F1 server, create an issue, start a session, and render/paginate activities before publishing. ([CYPACK-1314](https://linear.app/ceedar/issue/CYPACK-1314), [#1315](https://github.com/cyrusagents/cyrus/pull/1315))
+- F1 test drive verifying `ScheduleWakeup` delivery: confirmed the tool is non-operational when `CYRUS_ENABLE_WARM_SESSIONS` is unset (the default) because `ClaudeRunner` completes the streaming prompt on the SDK `result` message, the Claude Code subprocess exits at turn end, and the in-process wakeup timer dies with it; the identical scenario works end-to-end with `CYRUS_ENABLE_WARM_SESSIONS=1`. See `apps/f1/test-drives/2026-06-11-cypack-1310-schedulewakeup.md` for evidence and fix considerations. ([CYPACK-1310](https://linear.app/ceedar/issue/CYPACK-1310), [#1313](https://github.com/cyrusagents/cyrus/pull/1313))
+
+## [0.2.64] - 2026-06-11
+
+### Changed
+- Removed stale Slack setup skill guidance that pointed agents back to the retired hosted preview initialization workflow. ([CYHOST-1078](https://linear.app/ceedar/issue/CYHOST-1078/remove-legacy-agent-led-deploy-preview-skills-and-references), [#1310](https://github.com/cyrusagents/cyrus/pull/1310))
+- Codex app-server execution now shares app-server processes across sessions instead of spawning one per session. `AppServerProcessManager` pools processes by launch configuration (command + args + env): sessions with an identical config share one process and open their own app-server thread over the shared JSON-RPC connection, while sessions with a differing config (e.g. a different `CODEX_HOME`) transparently get their own process rather than failing. Notifications are routed to the owning session by `threadId` (falling back to the sole registered thread when a notification omits it), so concurrent sessions stay isolated; a process is torn down once its last lease is released (after a short idle grace) or when it exits, and a crash is confined to the sessions sharing that exact configuration. Validated with real-binary concurrent sessions (no cross-talk) and unit tests for pooling, idle eviction, and threadId routing. ([CYPACK-1288](https://linear.app/ceedar/issue/CYPACK-1288), [#1293](https://github.com/cyrusagents/cyrus/pull/1293))
+- Bumped `@openai/codex-sdk` from `0.125.0` to `^0.137.0` in `cyrus-codex-runner`. Codex 0.128 (`#19449`) removed the inline `SandboxPolicy.readOnlyAccess` read-restriction mechanism and migrated it to named **permission profiles**; the per-thread sandbox was reworked onto that model (see the Codex sandbox entry below). Streaming/steer, startup-gap follow-ups, cross-process `thread/resume`, and full sandbox enforcement (write confinement + read restriction) were all re-validated end-to-end against the 0.137 binary. ([CYPACK-1288](https://linear.app/ceedar/issue/CYPACK-1288), [#1293](https://github.com/cyrusagents/cyrus/pull/1293))
+- Reworked how `cyrus-codex-runner` locates/launches `codex app-server`. Previously it re-derived the platform->vendor native-binary path itself (a copy of the SDK's private resolver, coupled to the vendor layout - which is why the 0.137 bump needed a `bin/` vs `codex/` fallback). Now `@openai/codex` is a direct dependency and we invoke its **public** `bin/codex.js` launcher via Node (read from the package's `package.json` `bin` entry), letting that launcher own platform/vendor resolution. The `@openai/codex-sdk` is retained for its TypeScript types. Because the launcher spawns the native binary as a grandchild, the app-server child is now spawned `detached` (its own POSIX process group) and torn down with a group-kill, so the native process is reaped immediately on `close()`/`stop()` instead of lingering until its stdin pipe closes - re-validated leak-free against the concurrency and abrupt-stop soak harnesses. ([CYPACK-1288](https://linear.app/ceedar/issue/CYPACK-1288), [#1293](https://github.com/cyrusagents/cyrus/pull/1293))
+- Refactored the `cyrus-codex-runner` package from a single ~1580-line `CodexRunner` god class into focused collaborators behind a `CodexBackend` transport strategy: `CodexConfigBuilder` (config/model-fallback resolution), `mcpConfigTranslator` (Cyrus->Codex MCP config), `CodexSkillStager` (managed-skill symlink lifecycle), and `CodexEventMapper` (normalized-event->`SDKMessage` mapping). Both transports - `ExecCodexBackend` (existing `codex exec` path) and the new `AppServerCodexBackend` - emit a backend-neutral `NormalizedCodexEvent` stream so the mapper is transport-agnostic. Behavior is unchanged for the default exec path (all existing tests green). ([CYPACK-1288](https://linear.app/ceedar/issue/CYPACK-1288), [#1293](https://github.com/cyrusagents/cyrus/pull/1293))
+
+### Fixed
+- App-server Codex sessions no longer wrongly defer (and silently drop) a fast follow-up that arrives during the session startup window. Previously `isStreaming()` only returned true once a turn was active, but the turn becomes active several seconds in (after config build / `codex login status` / process spawn / `thread/start`), so a quick second Slack message hit "I'm still working... I'll pick up your new message once I'm done" and was never picked up. Now the runner reports streaming for the whole running window, buffers follow-ups that arrive before the turn is steerable, and flushes them via `turn/steer` once the server emits `turn/started` (steering before that is rejected with "no active turn"). Validated end-to-end against the real binary (a gap follow-up is incorporated into the turn). ([CYPACK-1288](https://linear.app/ceedar/issue/CYPACK-1288), [#1293](https://github.com/cyrusagents/cyrus/pull/1293))
+
+### Added
+- Per-thread Codex sandbox via the app-server. A `resolveCodexSandbox` unit maps Cyrus sandbox intent to a transport-neutral `ResolvedCodexSandbox` union (`workspace-mode` for the default coarse mode, or a granular `profile`); `AppServerCodexBackend` serializes it - the mode arm via `thread/start.sandbox` + `config.sandbox_workspace_write`, the profile arm via `thread/start.permissions` (the profile id) + `config.permissions.<id>` (the profile body). `RunnerConfigBuilder` plumbs the egress sandbox's filesystem posture (worktree-write, allowed-dirs-read, home denied by omission) into `CodexRunnerConfig.sandboxSettings` for Codex, mirroring Claude. Sandbox logic was consolidated out of `CodexConfigBuilder`/the backend into the single `resolveCodexSandbox` owner; `ResolvedCodexConfig.additionalDirectories` was folded into the sandbox's writable roots. Enforcement (allowed write succeeds, outside write + home read blocked) was confirmed end-to-end through `CodexRunner`. Implementation note: Codex 0.128 (`#19449`) removed the inline `SandboxPolicy.readOnlyAccess`/`readableRoots` mechanism an earlier iteration used and replaced it with named permission profiles. The profile is a flattened `filesystem` map of path -> `read`/`write`/`deny`, keyed by absolute paths or special tokens (`:minimal` = platform defaults - the anti-shell-starvation escape hatch, `:workspace_roots` = worktree, `:tmpdir`, `:slash_tmp`); `permissions` and `sandbox` are mutually exclusive on `thread/start`/`thread/resume`. ([CYPACK-1288](https://linear.app/ceedar/issue/CYPACK-1288), [#1293](https://github.com/cyrusagents/cyrus/pull/1293))
+- App-server backend feature parity with exec: `additionalDirectories` (multi-repo sub-worktrees) now map to `config.sandbox_workspace_write.writable_roots` on thread/start (the app-server has no `--add-dir` flag); `outputSchema` is passed on turn/start for structured output; and MCP servers configured via `config.mcp_servers` were confirmed to load and dispatch tool calls under app-server (validated end-to-end against the real binary; `mcp_tool_call` results/errors map through to normalized items). Codex's own ARC safety monitor may still gate external MCP calls on synthetic servers - that is runtime model behavior, not an integration defect. ([CYPACK-1288](https://linear.app/ceedar/issue/CYPACK-1288), [#1293](https://github.com/cyrusagents/cyrus/pull/1293))
+- App-server backend robustness hardening: per-request control-plane timeouts in the JSON-RPC client (default 60s - a wedged app-server now rejects pending requests instead of hanging the session); a turn idle-watchdog that fails an in-flight turn after prolonged silence (default 5min, configurable/disable-able); and resilient mid-turn comment dispatch in EdgeWorker - if a steer-only backend rejects a message (turn ended in the race window), the comment now falls back to a fresh resume turn instead of being dropped (no-op for Claude, which never throws there). `thread/resume` across a fresh app-server process was validated end-to-end (context recalled after the process was killed). Concurrency/soak validated against the real binary: N simultaneous runners stay isolated (no cross-talk, distinct threads) and every app-server child process is reaped on both normal completion and abrupt mid-turn `stop()` (zero leaked processes). ([CYPACK-1288](https://linear.app/ceedar/issue/CYPACK-1288), [#1293](https://github.com/cyrusagents/cyrus/pull/1293))
+- `AppServerCodexBackend`: drives Codex via the `codex app-server` JSON-RPC protocol (newline-delimited JSON-RPC 2.0 over stdio) with `initialize`->`thread/start`/`thread/resume`->`turn/start` lifecycle, app-server v2 item translation (camelCase->normalized), and `turn/steer` for mid-turn input injection. Includes replay tests built from real `codex app-server` transcripts and an injectable client (`IAppServerClient`) for hermetic backend tests. ([CYPACK-1288](https://linear.app/ceedar/issue/CYPACK-1288), [#1293](https://github.com/cyrusagents/cyrus/pull/1293))
+- The `codex exec` backend was removed - Codex now runs exclusively through the app-server. The `ExecCodexBackend`, the `CodexRunnerConfig.useAppServer` field, the `EdgeWorkerConfig.codexUseAppServer` flag (+ its ConfigManager merge/change-detection wiring and the two EdgeWorker injection sites), and the `CODEX_USE_APP_SERVER` env gate are all gone. `CodexRunner.supportsStreamingInput` is now a constant `true`. This also fixes the bug where `codexUseAppServer` was dropped in `WorkerService`'s hand-built `EdgeWorkerConfig` (so the flag never reached self-hosted runs) - there is no flag to drop anymore. ([CYPACK-1288](https://linear.app/ceedar/issue/CYPACK-1288), [#1293](https://github.com/cyrusagents/cyrus/pull/1293))
+
+### Security
+- Bumped the Gemini runner test/dev dependency on `@google/gemini-cli-core` to `0.46.0` and added a narrow `@grpc/grpc-js >=1.14.4` override because the latest stable owning package still resolves the vulnerable transitive. Removed the now-redundant `shell-quote` override. ([CYPACK-1311](https://linear.app/ceedar/issue/CYPACK-1311), [#1314](https://github.com/cyrusagents/cyrus/pull/1314))
+
+## [0.2.63] - 2026-06-09
+
+### Fixed
+- Fixed two CI failures introduced by CYPACK-1298: (1) `DEBUG_CLAUDE_AGENT_SDK=1` leaked from `process.env` into non-debug sessions — `ClaudeRunner` now explicitly clears the key when not in debug mode; (2) `packages/edge-worker` chat-session test asserted `Glob` in `allowedTools` after `Glob` was removed from the SDK tool registry. ([CYPACK-1301](https://linear.app/ceedar/issue/CYPACK-1301), [#1304](https://github.com/cyrusagents/cyrus/pull/1304))
+
+### Changed
+- Updated `@anthropic-ai/claude-agent-sdk` from `0.3.159` to `0.3.170` and `@anthropic-ai/sdk` from `^0.100.1` to `^0.102.0`. Refreshed the tool allowance lists in `packages/claude-runner/src/config.ts` and `packages/core/src/allowed-tools-defaults.ts` to match Claude Code SDK v2.1.170: removed `Glob`, `Grep`, and `LSP` (no longer in the SDK tool registry), added `RemoteTrigger` to `config.ts` and `RemoteTrigger`/`Workflow` to the default allowed-tool lists. Added `fable` (`claude-fable-5`) as a recognized Claude model alias in `RunnerSelectionService.ts` with fallback chain `fable → opus → sonnet`. See [SDK changelog](https://github.com/anthropics/claude-agent-sdk-typescript/blob/main/CHANGELOG.md). ([CYPACK-1298](https://linear.app/ceedar/issue/CYPACK-1298), [#1302](https://github.com/cyrusagents/cyrus/pull/1302))
+
+### Security
+- Bumped `vitest` (and `@vitest/ui`, `@vitest/coverage-v8`) from `3.x` to `^4.1.0` across all packages to patch the critical advisory [GHSA-5xrq-8626-4rwp](https://github.com/advisories/GHSA-5xrq-8626-4rwp) (arbitrary file read/exec via the Vitest UI server; vulnerable `<4.1.0`). Migrated test mocks to satisfy Vitest 4's `new`-based mock construction (constructor mocks must use `function`/`class`, not arrows) and disabled biome's `useArrowFunction` rule for test files so the autofix can't revert them. Supersedes Dependabot PR #1279. ([CYPACK-1278](https://linear.app/ceedar/issue/CYPACK-1278), [#1285](https://github.com/cyrusagents/cyrus/pull/1285))
+- Bumped `@google/gemini-cli-core` from `0.17.0` to `0.45.3` in the Gemini runner test/dev dependency graph and added a narrow `shell-quote >=1.8.4` override because the owning package's latest release still resolved the vulnerable transitive. This patches [GHSA-w7jw-789q-3m8p](https://github.com/advisories/GHSA-w7jw-789q-3m8p) so `pnpm audit` stays clean. ([CYPACK-1302](https://linear.app/ceedar/issue/CYPACK-1302), [#1306](https://github.com/cyrusagents/cyrus/pull/1306))
+
+## [0.2.62] - 2026-06-02
+
+_No internal-only changes._
+
+## [0.2.61] - 2026-06-01
+
+_No internal-only changes._
+
+## [0.2.60] - 2026-05-28
+
+_No internal-only changes._
+
+## [0.2.59] - 2026-05-28
+
+_No internal-only changes._
+
+## [0.2.58] - 2026-05-26
+
+### Added
+- **F1: `terminate-issue` command** — F1 can now drive a Linear issue to a terminal state (`completed` / `canceled` / `deleted`) via `apps/f1/f1 terminate-issue --issue-id <id> --action <completed|canceled|deleted>`. The new `CLIIssueTrackerService.terminateIssue` method updates the in-memory state (or removes the issue for `deleted`) and emits an `IssueStateChangeMessage` on the unified message bus via `CLIEventTransport.emitMessage`, so EdgeWorker's terminal-state cleanup path (stop sessions, run `cyrus-teardown.sh`, remove worktrees) is exercised end-to-end in CLI mode. EdgeWorker's CLI setup now subscribes to the transport's `"message"` event in addition to `"event"`. Unblocks F1 testing of the per-repo `cyrus-teardown.sh` feature shipped in [CYPACK-1219](https://linear.app/ceedar/issue/CYPACK-1219), and any future terminal-state behavior. ([CYPACK-1219](https://linear.app/ceedar/issue/CYPACK-1219), [#1233](https://github.com/cyrusagents/cyrus/pull/1233))
+
+## [0.2.57] - 2026-05-22
+
+_No internal-only changes._
+
+## [0.2.55] - 2026-05-22
+
+### Changed
+- Documented the path-bearing `EdgeWorkerConfig` field gotcha in `CLAUDE.md`: top-level path fields like `slackMcpConfigs` / `linearMcpConfigs` / `githubMcpConfigs` are read directly off `this.config.<field>` and bypass the per-repo resolution loop, so they must be normalized in `EdgeWorker.normalizeConfigPaths()` (called from the constructor and on `configChanged`). ([#1242](https://github.com/cyrusagents/cyrus/pull/1242))
+
+## [0.2.54] - 2026-05-22
+
+_No internal-only changes._
+
+## [0.2.53] - 2026-05-22
+
+_No internal-only changes._
+
 ## [0.2.52] - 2026-05-13
 
 _No internal-only changes._

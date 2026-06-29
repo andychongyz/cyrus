@@ -1,12 +1,13 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import type { SDKMessage } from "cyrus-claude-runner";
+import type { SDKMessage, SdkPluginConfig } from "cyrus-claude-runner";
 import type {
 	AgentRunnerConfig,
 	AgentSessionInfo,
 	CyrusAgentSession,
 	IAgentRunner,
 	ILogger,
+	RepositoryConfig,
 } from "cyrus-core";
 import { createLogger } from "cyrus-core";
 import { AgentSessionManager } from "./AgentSessionManager.js";
@@ -28,6 +29,17 @@ export interface ChatPlatformAdapter<TEvent> {
 	/** Extract the user's task text from the raw event */
 	extractTaskInstructions(event: TEvent): string;
 
+	/**
+	 * Whether this event is allowed to *start* a brand-new session for its
+	 * thread. Events that may only continue an already-bound thread (e.g. a
+	 * plain Slack message that isn't an @mention) return false, so the handler
+	 * ignores them when no session exists yet.
+	 *
+	 * Optional — when omitted, every event is treated as session-initiating
+	 * (the behaviour for platforms where every event is an explicit invocation).
+	 */
+	isSessionInitiatingEvent?(event: TEvent): boolean;
+
 	/** Derive a unique thread key for session tracking (e.g., "C123:1704110400.000100") */
 	getThreadKey(event: TEvent): string;
 
@@ -46,6 +58,16 @@ export interface ChatPlatformAdapter<TEvent> {
 	/** Acknowledge receipt of the event (e.g., emoji reaction). Fire-and-forget */
 	acknowledgeReceipt(event: TEvent): Promise<void>;
 
+	/**
+	 * Acknowledge that the agent finished processing the event (e.g., swap the
+	 * receipt reaction for a "done" one). Called after the turn completes,
+	 * whether or not a reply was actually posted — this is what tells users a
+	 * message was seen even when the agent chose to stay silent.
+	 *
+	 * Optional — platforms without a processed indicator omit it. Fire-and-forget.
+	 */
+	acknowledgeProcessed?(event: TEvent): Promise<void>;
+
 	/** Notify the user that a previous request is still processing */
 	notifyBusy(event: TEvent, threadKey: string): Promise<void>;
 }
@@ -61,6 +83,20 @@ export interface ChatSessionHandlerDeps {
 	runnerConfigBuilder: RunnerConfigBuilder;
 	/** Factory function that creates the appropriate runner based on config.defaultRunner */
 	createRunner: (config: AgentRunnerConfig) => IAgentRunner;
+	/**
+	 * Live read of the workspace-level custom-integration MCP config paths
+	 * for the chat platform this handler is bound to (e.g.
+	 * `config.slackMcpConfigs` for Slack). Chat sessions are repo-agnostic,
+	 * so `repository.mcpConfigPath` is not consulted; only this list
+	 * determines which custom `.mcp.json` files load. When empty/omitted,
+	 * no custom files load (native MCP servers still run as usual).
+	 */
+	getPlatformMcpConfigOverrides?: () => readonly string[] | undefined;
+	/** Resolve managed skill plugins and scoped skill names for a chat session. */
+	resolveSkillsConfig?: (input: {
+		repository?: RepositoryConfig;
+		repositoryPaths: string[];
+	}) => Promise<{ plugins?: SdkPluginConfig[]; skills?: string[] | "all" }>;
 	onWebhookStart: () => void;
 	onWebhookEnd: () => void;
 	onStateChange: () => Promise<void>;
@@ -80,13 +116,30 @@ export class ChatSessionHandler<TEvent> {
 	private threadSessions: Map<string, string> = new Map();
 	private deps: ChatSessionHandlerDeps;
 	private logger: ILogger;
-	// FIFO queue of events awaiting a reply, keyed by sessionId. Each entry is
+	// Queue of events awaiting a reply, keyed by sessionId. Each entry is
 	// enqueued when a new prompt (initial/resume/follow-up-inject) is sent to
-	// the runner, and consumed when the corresponding `result` message arrives
-	// on the runner's message stream. This decouples reply posting from
+	// the runner, and the queue is drained when a `result` message arrives on
+	// the runner's message stream. This decouples reply posting from
 	// `startStreaming()` resolution, which never resolves when warm sessions
 	// hold the streaming prompt open across turns.
+	//
+	// Drained wholesale, NOT one-per-result: messages injected in quick
+	// succession get merged by the runner into a single turn (one `result`
+	// answering several queued prompts), so a strict FIFO pairing would leave
+	// orphaned entries that never get acknowledged — and would pair them with
+	// the wrong later turns.
 	private pendingReplyEvents: Map<string, TEvent[]> = new Map();
+	// Last event enqueued per session. When a merged turn drained the queue
+	// ahead of schedule, a subsequent `result` finds the queue empty — this
+	// remembers where to post that turn's reply (all events in a session share
+	// one thread, so any recent event addresses it correctly).
+	private lastReplyEvent: Map<string, TEvent> = new Map();
+	// Follow-up events that arrived while a turn was running and could not be
+	// streamed into it (e.g. the exec Codex backend, which has no mid-turn input
+	// channel). Keyed by threadKey. Drained when the running turn completes and
+	// re-dispatched as a fresh turn, so a follow-up is never silently dropped —
+	// honoring the "I'll pick up your new message once I'm done" promise.
+	private pendingFollowups: Map<string, TEvent[]> = new Map();
 
 	constructor(
 		adapter: ChatPlatformAdapter<TEvent>,
@@ -147,10 +200,13 @@ export class ChatSessionHandler<TEvent> {
 						this.enqueueReply(existingSessionId, event);
 						existingRunner.addStreamMessage(taskInstructions);
 					} else {
-						// Runner doesn't support streaming input or isn't in streaming mode — notify user
+						// Runner can't accept mid-turn input (e.g. exec Codex). Queue the
+						// follow-up so it's delivered as a fresh turn once this one ends,
+						// rather than dropped — then tell the user we'll pick it up.
 						this.logger.info(
-							`Session ${existingSessionId} is still running, notifying user (thread ${threadKey})`,
+							`Session ${existingSessionId} is still running; queuing follow-up for after the turn (thread ${threadKey})`,
 						);
+						this.queuePendingFollowup(threadKey, event);
 						await this.adapter.notifyBusy(event, threadKey);
 					}
 					return;
@@ -163,7 +219,10 @@ export class ChatSessionHandler<TEvent> {
 					);
 
 					const resumeSessionId =
-						existingSession.claudeSessionId || existingSession.geminiSessionId;
+						existingSession.claudeSessionId ||
+						existingSession.geminiSessionId ||
+						existingSession.codexSessionId ||
+						existingSession.cursorSessionId;
 
 					if (resumeSessionId) {
 						try {
@@ -188,6 +247,20 @@ export class ChatSessionHandler<TEvent> {
 				this.logger.info(
 					`Previous session ${existingSessionId} for thread ${threadKey} has no runner, creating new session`,
 				);
+			}
+
+			// No session exists for this thread. Only events explicitly allowed to
+			// start a session may do so — e.g. a Slack @mention. A plain follow-up
+			// message in an unbound thread must be ignored, otherwise every message
+			// in any channel Cyrus can see would spin up a session.
+			if (
+				!existingSessionId &&
+				this.adapter.isSessionInitiatingEvent?.(event) === false
+			) {
+				this.logger.info(
+					`Ignoring non-initiating ${this.adapter.platformName} event for unbound thread ${threadKey}`,
+				);
+				return;
 			}
 
 			// Create an empty workspace directory for this thread
@@ -232,7 +305,7 @@ export class ChatSessionHandler<TEvent> {
 			const systemPrompt = this.adapter.buildSystemPrompt(event);
 
 			// Build runner config
-			const runnerConfig = this.buildRunnerConfig(
+			const runnerConfig = await this.buildRunnerConfig(
 				session.workspace.path,
 				sessionId,
 				systemPrompt,
@@ -320,6 +393,18 @@ export class ChatSessionHandler<TEvent> {
 	}
 
 	/**
+	 * Expose every active chat session this handler owns, so EdgeWorker
+	 * can resolve a cwd → session bundle from outside (e.g. the
+	 * `log_failure_mode` MCP tool needs to find a Slack/GitHub chat
+	 * session's runner session id). Chat sessions live in this handler's
+	 * dedicated AgentSessionManager — they aren't reachable from
+	 * EdgeWorker's primary AgentSessionManager.
+	 */
+	getAllChatSessions(): CyrusAgentSession[] {
+		return this.sessionManager.getAllSessions();
+	}
+
+	/**
 	 * Test/inspection: list all known thread keys and their session IDs.
 	 * Used by F1 to discover chat sessions for follow-up prompts and replay.
 	 */
@@ -351,7 +436,7 @@ export class ChatSessionHandler<TEvent> {
 	): Promise<void> {
 		const systemPrompt = this.adapter.buildSystemPrompt(event);
 
-		const runnerConfig = this.buildRunnerConfig(
+		const runnerConfig = await this.buildRunnerConfig(
 			existingSession.workspace.path,
 			sessionId,
 			systemPrompt,
@@ -398,49 +483,111 @@ export class ChatSessionHandler<TEvent> {
 		await this.sessionManager.handleClaudeMessage(sessionId, message);
 
 		if (message.type === "result") {
-			const event = this.dequeueReply(sessionId);
+			// A `result` ends the turn, and the turn has seen every prompt
+			// injected so far — drain the whole queue, not just one entry
+			// (quick-succession messages get merged into a single turn).
+			const events = this.drainReplies(sessionId);
 			const runner = this.sessionManager.getAgentRunner(sessionId);
-			if (event && runner) {
+			// Queue already drained by an earlier merged turn? The reply still
+			// belongs to this session's thread — post it via the last event.
+			const replyEvent = events[0] ?? this.lastReplyEvent.get(sessionId);
+			if (replyEvent && runner) {
 				try {
-					await this.adapter.postReply(event, runner);
+					await this.adapter.postReply(replyEvent, runner);
 				} catch (error) {
 					this.logger.error(
 						`Failed to post ${this.adapter.platformName} reply for session ${sessionId}`,
 						error instanceof Error ? error : new Error(String(error)),
 					);
 				}
-			} else if (!event) {
+				// Fire-and-forget processed acknowledgement for every drained
+				// event (e.g., swap the receipt reaction) — runs even when
+				// postReply stayed silent.
+				for (const event of events) {
+					this.adapter.acknowledgeProcessed?.(event).catch((err: unknown) => {
+						this.logger.warn(
+							`Failed to acknowledge processed ${this.adapter.platformName} event: ${err instanceof Error ? err.message : err}`,
+						);
+					});
+				}
+			} else if (!replyEvent) {
 				this.logger.warn(
 					`Received result for session ${sessionId} with no pending reply event — nothing to post`,
 				);
 			}
+
+			// The turn is done — deliver any follow-ups that arrived while busy.
+			this.drainPendingFollowups(sessionId);
 		}
+	}
+
+	private queuePendingFollowup(threadKey: string, event: TEvent): void {
+		const queue = this.pendingFollowups.get(threadKey) ?? [];
+		queue.push(event);
+		this.pendingFollowups.set(threadKey, queue);
+	}
+
+	private threadKeyForSession(sessionId: string): string | undefined {
+		for (const [threadKey, id] of this.threadSessions) {
+			if (id === sessionId) {
+				return threadKey;
+			}
+		}
+		return undefined;
+	}
+
+	/**
+	 * Re-dispatch any follow-ups queued for a thread while it was busy. Runs
+	 * after the current turn settles (the runner has finalized), so each
+	 * re-dispatched event takes the normal resume path. Any that still find the
+	 * runner running re-queue themselves and are drained on the next completion.
+	 */
+	private drainPendingFollowups(sessionId: string): void {
+		const threadKey = this.threadKeyForSession(sessionId);
+		if (!threadKey) {
+			return;
+		}
+		const queue = this.pendingFollowups.get(threadKey);
+		if (!queue || queue.length === 0) {
+			return;
+		}
+		this.pendingFollowups.delete(threadKey);
+		// Defer so the just-finished runner has fully transitioned to not-running
+		// before the follow-up is re-evaluated (otherwise it would re-queue).
+		setImmediate(() => {
+			for (const event of queue) {
+				this.handleEvent(event).catch((error: unknown) => {
+					this.logger.error(
+						`Failed to re-dispatch queued ${this.adapter.platformName} follow-up (thread ${threadKey})`,
+						error instanceof Error ? error : new Error(String(error)),
+					);
+				});
+			}
+		});
 	}
 
 	private enqueueReply(sessionId: string, event: TEvent): void {
 		const queue = this.pendingReplyEvents.get(sessionId) ?? [];
 		queue.push(event);
 		this.pendingReplyEvents.set(sessionId, queue);
+		this.lastReplyEvent.set(sessionId, event);
 	}
 
-	private dequeueReply(sessionId: string): TEvent | undefined {
+	private drainReplies(sessionId: string): TEvent[] {
 		const queue = this.pendingReplyEvents.get(sessionId);
-		if (!queue || queue.length === 0) return undefined;
-		const event = queue.shift();
-		if (queue.length === 0) {
-			this.pendingReplyEvents.delete(sessionId);
-		}
-		return event;
+		if (!queue || queue.length === 0) return [];
+		this.pendingReplyEvents.delete(sessionId);
+		return queue;
 	}
 
 	/**
 	 * Discard all queued reply events for a session. Called when the runner
 	 * rejects before emitting a final `result` — without this, a later
-	 * resumeSession() on the same sessionId would pair the stale event with
-	 * the first `result` of the new runner and shift all subsequent replies
-	 * by one turn.
+	 * resumeSession() on the same sessionId would pair the stale events with
+	 * the first `result` of the new runner.
 	 */
 	private clearPendingReplies(sessionId: string): void {
+		this.lastReplyEvent.delete(sessionId);
 		const queue = this.pendingReplyEvents.get(sessionId);
 		if (!queue || queue.length === 0) return;
 		this.logger.warn(
@@ -480,13 +627,13 @@ export class ChatSessionHandler<TEvent> {
 	 * Build a runner config for a chat session.
 	 * Delegates to RunnerConfigBuilder for config assembly.
 	 */
-	private buildRunnerConfig(
+	private async buildRunnerConfig(
 		workspacePath: string,
 		workspaceName: string | undefined,
 		systemPrompt: string,
 		sessionId: string,
 		resumeSessionId?: string,
-	): AgentRunnerConfig {
+	): Promise<AgentRunnerConfig> {
 		const sessionLogger = this.logger.withContext({
 			sessionId,
 			platform: this.adapter.platformName,
@@ -494,6 +641,11 @@ export class ChatSessionHandler<TEvent> {
 
 		// Read live values from the provider at session-build time
 		const provider = this.deps.chatRepositoryProvider;
+		const repository = provider.getDefaultRepository();
+		const repositoryPaths = provider.getRepositoryPaths();
+		const skillsConfig = this.deps.resolveSkillsConfig
+			? await this.deps.resolveSkillsConfig({ repository, repositoryPaths })
+			: {};
 
 		return this.deps.runnerConfigBuilder.buildChatConfig({
 			workspacePath,
@@ -504,8 +656,11 @@ export class ChatSessionHandler<TEvent> {
 			cyrusHome: this.deps.cyrusHome,
 			platformName: this.adapter.platformName,
 			linearWorkspaceId: provider.getDefaultLinearWorkspaceId(),
-			repository: provider.getDefaultRepository(),
-			repositoryPaths: provider.getRepositoryPaths(),
+			repository,
+			repositoryPaths,
+			platformMcpConfigOverrides: this.deps.getPlatformMcpConfigOverrides?.(),
+			plugins: skillsConfig.plugins,
+			skills: skillsConfig.skills,
 			logger: sessionLogger,
 			onMessage: (message: SDKMessage) =>
 				this.handleAgentMessage(sessionId, message),

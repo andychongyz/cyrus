@@ -1,10 +1,12 @@
 import type {
+	BackgroundTaskSummary,
 	HookCallbackMatcher,
 	HookEvent,
 	McpServerConfig,
 	SDKMessage,
 	SDKUserMessage,
 	SdkPluginConfig,
+	SessionCronSummary,
 } from "@anthropic-ai/claude-agent-sdk";
 // Import the AskUserQuestionInput type from the SDK's tool input types
 // This ensures we use the SDK's official type definitions
@@ -24,6 +26,29 @@ import type { ILogger } from "./logging/ILogger.js";
  * @see {@link https://platform.claude.com/docs/en/agent-sdk/typescript#ask-user-question}
  */
 export type AskUserQuestionInput = SDKAskUserQuestionInput;
+
+// ============================================================================
+// PENDING WORK TYPES
+// ============================================================================
+
+/**
+ * Work that will wake an agent session later, reported by the SDK's Stop
+ * hook (`session_crons` / `background_tasks` on `StopHookInput`). These are
+ * the only signals that distinguish "session is done" from "session is
+ * paused waiting to be woken" — the message stream itself (including the
+ * `result` message) carries no pending-work information. See the F1 test
+ * drive `2026-06-11-cypack-1310-schedulewakeup.md` for the evidence.
+ */
+export interface AgentPendingWork {
+	/**
+	 * Session-scoped cron tasks (CronCreate, ScheduleWakeup, /loop) that will
+	 * wake the session later. One-shot wakeups have `recurring: false` and a
+	 * cron `schedule` encoding their single fire time.
+	 */
+	sessionCrons: SessionCronSummary[];
+	/** In-flight background work (running/pending + backgrounded tasks). */
+	backgroundTasks: BackgroundTaskSummary[];
+}
 
 /**
  * Simplified option type for easier API consumption.
@@ -333,6 +358,17 @@ export interface IAgentRunner {
 	isWarm?(): boolean;
 
 	/**
+	 * Pending work that will wake this session later (scheduled wakeups,
+	 * session crons, in-flight background tasks), as last reported by the
+	 * SDK's Stop hook. Runners that support this return the latest snapshot;
+	 * both arrays are empty when nothing is scheduled or in flight.
+	 *
+	 * Consult this when a `result` message arrives to decide whether the
+	 * session is truly finished or merely paused until a wakeup fires.
+	 */
+	getPendingWork?(): AgentPendingWork;
+
+	/**
 	 * Check if the session is currently running
 	 *
 	 * @returns True if the session is active and processing, false otherwise
@@ -414,6 +450,15 @@ export interface AgentRunnerConfig {
 	disallowedTools?: string[];
 	/** Directories the agent can read from */
 	allowedDirectories?: string[];
+	/**
+	 * Extra working-tree roots to register with the agent beyond the cwd.
+	 * For Claude this maps to the SDK `additionalDirectories` option (the
+	 * `--add-dir` flag), which — unlike a plain permission grant — also
+	 * auto-loads each directory's `.claude/skills/`. Used for multi-repo
+	 * sessions where the participating repos live in sibling sub-worktrees of
+	 * the cwd, so their repo-local skills get discovered.
+	 */
+	additionalDirectories?: string[];
 	/** Session ID to resume from a previous session */
 	resumeSessionId?: string;
 	/** Workspace name for logging and organization */
@@ -459,7 +504,8 @@ export interface AgentRunnerConfig {
 	 * - `string[]`: enable only the listed skills.
 	 *
 	 * Used to enforce per-skill scope (repository / Linear team / Linear label).
-	 * Only the Claude runner respects this today.
+	 * Claude passes this to its SDK; Codex uses it to stage only allowed skills
+	 * into its native repository skill discovery layout.
 	 */
 	skills?: string[] | "all";
 	/**
@@ -535,6 +581,7 @@ export type AgentUserMessage = SDKUserMessage;
  * underlying provider SDK.
  */
 export type {
+	BackgroundTaskSummary,
 	HookCallbackMatcher,
 	HookEvent,
 	McpServerConfig,
@@ -543,4 +590,5 @@ export type {
 	SDKMessage,
 	SDKResultMessage,
 	SDKUserMessage,
+	SessionCronSummary,
 } from "@anthropic-ai/claude-agent-sdk";

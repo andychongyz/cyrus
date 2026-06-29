@@ -38,6 +38,8 @@ Construct the manifest, substituting `<AGENT_NAME>`, `<AGENT_DESCRIPTION>`, and 
 
 **IMPORTANT: Use the manifest template EXACTLY as shown below.** The event subscription path MUST be `/slack-webhook` (not `/slack/events` or any other path). This matches the route registered by `SlackEventTransport` in the Cyrus codebase.
 
+**NOTE: this list of scopes must be kept in sync with the Slack App configuration and the list of scopes defined at [https://github.com/cyrusagents/cyrus-hosted/blob/main/apps/app/src/lib/slack/constants.ts](https://github.com/cyrusagents/cyrus-hosted/blob/main/apps/app/src/lib/slack/constants.ts). If you change scopes here, propose matching changes there and update any live Slack App configuration that relies on this manifest.**
+
 ```json
 {
     "display_information": {
@@ -48,7 +50,7 @@ Construct the manifest, substituting `<AGENT_NAME>`, `<AGENT_DESCRIPTION>`, and 
     "features": {
         "bot_user": {
             "display_name": "<AGENT_NAME>",
-            "always_online": false
+            "always_online": true
         }
     },
     "oauth_config": {
@@ -85,6 +87,9 @@ Construct the manifest, substituting `<AGENT_NAME>`, `<AGENT_DESCRIPTION>`, and 
                 "chat:write.customize",
                 "groups:history",
                 "im:history",
+                "im:read",
+                "files:read",
+                "files:write",
                 "mpim:history",
                 "reactions:write",
                 "search:read.files",
@@ -102,7 +107,11 @@ Construct the manifest, substituting `<AGENT_NAME>`, `<AGENT_DESCRIPTION>`, and 
             "request_url": "<CYRUS_BASE_URL>/slack-webhook",
             "bot_events": [
                 "app_mention",
-                "member_joined_channel"
+                "member_joined_channel",
+                "message.channels",
+                "message.groups",
+                "message.mpim",
+                "message.im"
             ]
         },
         "org_deploy_enabled": false,

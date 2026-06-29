@@ -45,6 +45,16 @@
 					}
 				}
 			}
+		},
+		{
+			"includes": ["**/*.test.ts", "**/test/**/*.ts"],
+			"linter": {
+				"rules": {
+					"complexity": {
+						"useArrowFunction": "off"
+					}
+				}
+			}
 		}
 	],
 	"formatter": {

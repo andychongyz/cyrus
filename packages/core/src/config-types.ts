@@ -62,6 +62,27 @@ export type OAuthCallbackHandler = (
 	workspaceName: string,
 ) => Promise<void>;
 
+export type RepoSetupHookStatus = "started" | "succeeded" | "failed";
+
+export interface RepoSetupHookEvent {
+	status: RepoSetupHookStatus;
+	issueIdentifier: string;
+	scriptName: string;
+	repositoryName?: string;
+	durationMs?: number;
+	exitCode?: number | null;
+	signal?: string | null;
+	errorMessage?: string;
+	outputTail?: string;
+	stdoutTail?: string;
+	stderrTail?: string;
+	truncated?: boolean;
+}
+
+export type RepoSetupHookEventHandler = (
+	event: RepoSetupHookEvent,
+) => void | Promise<void>;
+
 /**
  * Runtime-only configuration fields for EdgeWorker.
  *
@@ -127,6 +148,7 @@ export interface EdgeWorkerRuntimeConfig {
 			options?: {
 				baseBranchOverrides?: Map<string, string>;
 				branchPrefixOverrides?: Map<string, string>;
+				onRepoSetupHookEvent?: RepoSetupHookEventHandler;
 			},
 		) => Promise<Workspace>;
 

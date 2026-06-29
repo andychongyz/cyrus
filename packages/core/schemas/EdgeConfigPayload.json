@@ -546,6 +546,12 @@
 		"global_setup_script": {
 			"type": "string"
 		},
+		"linearAllowedTools": {
+			"type": "array",
+			"items": {
+				"type": "string"
+			}
+		},
 		"defaultAllowedTools": {
 			"type": "array",
 			"items": {
@@ -558,7 +564,43 @@
 				"type": "string"
 			}
 		},
+		"slackAllowedTools": {
+			"type": "array",
+			"items": {
+				"type": "string"
+			}
+		},
+		"githubAllowedTools": {
+			"type": "array",
+			"items": {
+				"type": "string"
+			}
+		},
+		"slackMcpConfigs": {
+			"type": "array",
+			"items": {
+				"type": "string"
+			}
+		},
+		"linearMcpConfigs": {
+			"type": "array",
+			"items": {
+				"type": "string"
+			}
+		},
+		"githubMcpConfigs": {
+			"type": "array",
+			"items": {
+				"type": "string"
+			}
+		},
 		"issueUpdateTrigger": {
+			"type": "boolean"
+		},
+		"slackThreadFollowing": {
+			"type": "boolean"
+		},
+		"prReviewTrigger": {
 			"type": "boolean"
 		},
 		"userAccessControl": {

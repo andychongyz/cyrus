@@ -37,10 +37,12 @@ vi.mock("cyrus-core", async (importOriginal) => {
 		...actual,
 		isAgentSessionCreatedWebhook: vi.fn(),
 		isAgentSessionPromptedWebhook: vi.fn(),
-		PersistenceManager: vi.fn().mockImplementation(() => ({
-			loadEdgeWorkerState: vi.fn().mockResolvedValue(null),
-			saveEdgeWorkerState: vi.fn().mockResolvedValue(undefined),
-		})),
+		PersistenceManager: vi.fn().mockImplementation(function () {
+			return {
+				loadEdgeWorkerState: vi.fn().mockResolvedValue(null),
+				saveEdgeWorkerState: vi.fn().mockResolvedValue(undefined),
+			};
+		}),
 	};
 });
 vi.mock("file-type");
@@ -115,7 +117,9 @@ describe("EdgeWorker - Screenshot Upload Guidance Hooks", () => {
 			comments: vi.fn().mockResolvedValue({ nodes: [] }),
 			rawRequest: vi.fn(),
 		};
-		vi.mocked(LinearClient).mockImplementation(() => mockLinearClient);
+		vi.mocked(LinearClient).mockImplementation(function () {
+			return mockLinearClient;
+		});
 
 		// Mock ClaudeRunner - capture config for hook inspection
 		mockClaudeRunner = {
@@ -129,7 +133,7 @@ describe("EdgeWorker - Screenshot Upload Guidance Hooks", () => {
 			addStreamMessage: vi.fn(),
 			updatePromptVersions: vi.fn(),
 		};
-		vi.mocked(ClaudeRunner).mockImplementation((config: any) => {
+		vi.mocked(ClaudeRunner).mockImplementation(function (config: any) {
 			capturedRunnerConfig = config;
 			return mockClaudeRunner;
 		});
@@ -146,7 +150,7 @@ describe("EdgeWorker - Screenshot Upload Guidance Hooks", () => {
 			addStreamMessage: vi.fn(),
 			updatePromptVersions: vi.fn(),
 		};
-		vi.mocked(GeminiRunner).mockImplementation((_config: any) => {
+		vi.mocked(GeminiRunner).mockImplementation(function (_config: any) {
 			return mockGeminiRunner;
 		});
 
@@ -166,33 +170,29 @@ describe("EdgeWorker - Screenshot Upload Guidance Hooks", () => {
 			setActivitySink: vi.fn(),
 			on: vi.fn(),
 		};
-		vi.mocked(AgentSessionManager).mockImplementation(
-			() => mockAgentSessionManager,
-		);
+		vi.mocked(AgentSessionManager).mockImplementation(function () {
+			return mockAgentSessionManager;
+		});
 
 		// Mock SharedApplicationServer
-		vi.mocked(SharedApplicationServer).mockImplementation(
-			() =>
-				({
-					start: vi.fn().mockResolvedValue(undefined),
-					stop: vi.fn().mockResolvedValue(undefined),
-					getFastifyInstance: vi.fn().mockReturnValue({ post: vi.fn() }),
-					getWebhookUrl: vi
-						.fn()
-						.mockReturnValue("http://localhost:3456/webhook"),
-					registerOAuthCallbackHandler: vi.fn(),
-				}) as any,
-		);
+		vi.mocked(SharedApplicationServer).mockImplementation(function () {
+			return {
+				start: vi.fn().mockResolvedValue(undefined),
+				stop: vi.fn().mockResolvedValue(undefined),
+				getFastifyInstance: vi.fn().mockReturnValue({ post: vi.fn() }),
+				getWebhookUrl: vi.fn().mockReturnValue("http://localhost:3456/webhook"),
+				registerOAuthCallbackHandler: vi.fn(),
+			};
+		} as any);
 
 		// Mock LinearEventTransport
-		vi.mocked(LinearEventTransport).mockImplementation(
-			() =>
-				({
-					register: vi.fn(),
-					on: vi.fn(),
-					removeAllListeners: vi.fn(),
-				}) as any,
-		);
+		vi.mocked(LinearEventTransport).mockImplementation(function () {
+			return {
+				register: vi.fn(),
+				on: vi.fn(),
+				removeAllListeners: vi.fn(),
+			};
+		} as any);
 
 		// Mock type guards
 		vi.mocked(isAgentSessionCreatedWebhook).mockReturnValue(true);
@@ -408,203 +408,6 @@ Issue: {{issue_identifier}}`;
 
 			// Assert - should explain why the tool is needed
 			expect(additionalContext).toMatch(/linear|comment|embed|view/i);
-		});
-	});
-
-	describe("Chrome Computer Tool Screenshot Hook - Linear Upload Guidance", () => {
-		it("should have a hook configured for mcp__claude-in-chrome__computer screenshot action", async () => {
-			// Arrange
-			const mockIssue = createMockIssueWithLabels([]);
-			mockLinearClient.issue.mockResolvedValue(mockIssue);
-
-			const webhook: LinearAgentSessionCreatedWebhook = {
-				type: "Issue",
-				action: "agentSessionCreated",
-				organizationId: "test-workspace",
-				agentSession: {
-					id: "agent-session-123",
-					issue: {
-						id: "issue-123",
-						identifier: "TEST-123",
-						team: { key: "TEST" },
-					},
-					comment: { body: "@cyrus take a browser screenshot" },
-				},
-			};
-
-			// Act
-			await (edgeWorker as any).handleAgentSessionCreatedWebhook(webhook, [
-				mockRepository,
-			]);
-
-			// Assert - there should be a hook for the chrome computer tool
-			const chromeHook = findHookMatcher("mcp__claude-in-chrome__computer");
-			expect(chromeHook).toBeDefined();
-		});
-
-		it("should provide guidance about linear_upload_file when chrome computer tool takes a screenshot", async () => {
-			// Arrange
-			const mockIssue = createMockIssueWithLabels([]);
-			mockLinearClient.issue.mockResolvedValue(mockIssue);
-
-			const webhook: LinearAgentSessionCreatedWebhook = {
-				type: "Issue",
-				action: "agentSessionCreated",
-				organizationId: "test-workspace",
-				agentSession: {
-					id: "agent-session-123",
-					issue: {
-						id: "issue-123",
-						identifier: "TEST-123",
-						team: { key: "TEST" },
-					},
-					comment: { body: "@cyrus take a browser screenshot" },
-				},
-			};
-
-			// Act
-			await (edgeWorker as any).handleAgentSessionCreatedWebhook(webhook, [
-				mockRepository,
-			]);
-
-			const chromeHook = findHookMatcher("mcp__claude-in-chrome__computer");
-			expect(chromeHook).toBeDefined();
-
-			// Simulate a screenshot action response from the chrome tool
-			const additionalContext = await executeHookAndGetContext(
-				chromeHook!,
-				"mcp__claude-in-chrome__computer",
-				{
-					action: "screenshot",
-					imageId: "img_abc123",
-					path: "/tmp/chrome_screenshot.png",
-				},
-			);
-
-			// Assert - should mention linear_upload_file
-			expect(additionalContext).toBeDefined();
-			expect(additionalContext).toContain("linear_upload_file");
-		});
-
-		it("should not provide upload guidance for non-screenshot chrome computer actions", async () => {
-			// Arrange
-			const mockIssue = createMockIssueWithLabels([]);
-			mockLinearClient.issue.mockResolvedValue(mockIssue);
-
-			const webhook: LinearAgentSessionCreatedWebhook = {
-				type: "Issue",
-				action: "agentSessionCreated",
-				organizationId: "test-workspace",
-				agentSession: {
-					id: "agent-session-123",
-					issue: {
-						id: "issue-123",
-						identifier: "TEST-123",
-						team: { key: "TEST" },
-					},
-					comment: { body: "@cyrus click on a button" },
-				},
-			};
-
-			// Act
-			await (edgeWorker as any).handleAgentSessionCreatedWebhook(webhook, [
-				mockRepository,
-			]);
-
-			const chromeHook = findHookMatcher("mcp__claude-in-chrome__computer");
-
-			// If hook exists, test that non-screenshot actions don't get upload guidance
-			if (chromeHook) {
-				const additionalContext = await executeHookAndGetContext(
-					chromeHook,
-					"mcp__claude-in-chrome__computer",
-					{
-						action: "left_click",
-						coordinate: [100, 200],
-					},
-				);
-
-				// Non-screenshot actions should either have no additionalContext
-				// or not mention linear_upload_file
-				if (additionalContext) {
-					expect(additionalContext).not.toContain("linear_upload_file");
-				}
-			}
-		});
-	});
-
-	describe("GIF Creator Hook - Linear Upload Guidance", () => {
-		it("should have a hook configured for mcp__claude-in-chrome__gif_creator export action", async () => {
-			// Arrange
-			const mockIssue = createMockIssueWithLabels([]);
-			mockLinearClient.issue.mockResolvedValue(mockIssue);
-
-			const webhook: LinearAgentSessionCreatedWebhook = {
-				type: "Issue",
-				action: "agentSessionCreated",
-				organizationId: "test-workspace",
-				agentSession: {
-					id: "agent-session-123",
-					issue: {
-						id: "issue-123",
-						identifier: "TEST-123",
-						team: { key: "TEST" },
-					},
-					comment: { body: "@cyrus record and export a gif" },
-				},
-			};
-
-			// Act
-			await (edgeWorker as any).handleAgentSessionCreatedWebhook(webhook, [
-				mockRepository,
-			]);
-
-			// Assert - there should be a hook for the gif creator tool
-			const gifHook = findHookMatcher("mcp__claude-in-chrome__gif_creator");
-			expect(gifHook).toBeDefined();
-		});
-
-		it("should provide guidance about linear_upload_file when gif_creator exports a gif", async () => {
-			// Arrange
-			const mockIssue = createMockIssueWithLabels([]);
-			mockLinearClient.issue.mockResolvedValue(mockIssue);
-
-			const webhook: LinearAgentSessionCreatedWebhook = {
-				type: "Issue",
-				action: "agentSessionCreated",
-				organizationId: "test-workspace",
-				agentSession: {
-					id: "agent-session-123",
-					issue: {
-						id: "issue-123",
-						identifier: "TEST-123",
-						team: { key: "TEST" },
-					},
-					comment: { body: "@cyrus record and export a gif" },
-				},
-			};
-
-			// Act
-			await (edgeWorker as any).handleAgentSessionCreatedWebhook(webhook, [
-				mockRepository,
-			]);
-
-			const gifHook = findHookMatcher("mcp__claude-in-chrome__gif_creator");
-			expect(gifHook).toBeDefined();
-
-			// Simulate an export action response from gif creator
-			const additionalContext = await executeHookAndGetContext(
-				gifHook!,
-				"mcp__claude-in-chrome__gif_creator",
-				{
-					action: "export",
-					path: "/tmp/recording.gif",
-				},
-			);
-
-			// Assert - should mention linear_upload_file
-			expect(additionalContext).toBeDefined();
-			expect(additionalContext).toContain("linear_upload_file");
 		});
 	});
 

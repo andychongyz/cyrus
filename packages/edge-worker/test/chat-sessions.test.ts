@@ -1,13 +1,25 @@
 import { join } from "node:path";
 import { getReadOnlyTools } from "cyrus-claude-runner";
 import type { RepositoryConfig } from "cyrus-core";
-import { describe, expect, it, vi } from "vitest";
+import {
+	type SlackMessageAttachment,
+	SlackMessageService,
+	SlackReactionService,
+	type SlackWebhookEvent,
+} from "cyrus-slack-event-transport";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatRepositoryProvider } from "../src/ChatRepositoryProvider.js";
 import { LiveChatRepositoryProvider } from "../src/ChatRepositoryProvider.js";
 import type { ChatPlatformAdapter } from "../src/ChatSessionHandler.js";
 import { ChatSessionHandler } from "../src/ChatSessionHandler.js";
 import type { RunnerConfigBuilder } from "../src/RunnerConfigBuilder.js";
-import { SlackChatAdapter } from "../src/SlackChatAdapter.js";
+import {
+	BEHAVIOURS_PAGE_ROUTE,
+	PROCESSED_REACTION,
+	RECEIPT_REACTION,
+	SLACK_NO_RESPONSE_SENTINEL,
+	SlackChatAdapter,
+} from "../src/SlackChatAdapter.js";
 import { TEST_CYRUS_CHAT } from "./test-dirs.js";
 
 function createMockRunnerConfigBuilder(): RunnerConfigBuilder {
@@ -29,6 +41,8 @@ function createMockRunnerConfigBuilder(): RunnerConfigBuilder {
 				...(input.resumeSessionId
 					? { resumeSessionId: input.resumeSessionId }
 					: {}),
+				...(input.plugins ? { plugins: input.plugins } : {}),
+				...(input.skills !== undefined ? { skills: input.skills } : {}),
 				logger: input.logger,
 				maxTurns: 200,
 				onMessage: input.onMessage,
@@ -138,7 +152,6 @@ describe("ChatSessionHandler chat session permissions", () => {
 
 		expect(capturedConfig).toBeDefined();
 		expect(capturedConfig.allowedTools).toContain("Read(**)");
-		expect(capturedConfig.allowedTools).toContain("Glob");
 		expect(capturedConfig.allowedTools).toContain("Bash(git -C * pull)");
 		expect(capturedConfig.allowedTools).not.toContain("Edit(**)");
 
@@ -147,6 +160,522 @@ describe("ChatSessionHandler chat session permissions", () => {
 		for (const path of chatRepositoryPaths) {
 			expect(capturedConfig.allowedDirectories).toContain(path);
 		}
+	});
+
+	it("passes scoped managed skills to chat runner configs", async () => {
+		const event: TestEvent = {
+			eventId: "test-event",
+			threadKey: "test-thread",
+		};
+		const cyrusHome = TEST_CYRUS_CHAT;
+		const repository = {
+			id: "repo-a",
+			name: "Repo A",
+			repositoryPath: "/repo/chat-one",
+			allowedTools: [],
+		} as unknown as RepositoryConfig;
+		const chatRepositoryPaths = ["/repo/chat-one"];
+		const plugins = [{ type: "local" as const, path: "/cyrus/user-skills" }];
+		let capturedConfig: any;
+
+		const adapter = new TestChatAdapter("thread-key");
+		const createRunner = vi.fn((config: any) => {
+			capturedConfig = config;
+			return {
+				supportsStreamingInput: false,
+				start: vi.fn().mockResolvedValue({ sessionId: "session-1" }),
+				stop: vi.fn(),
+				isRunning: vi.fn().mockReturnValue(false),
+				isStreaming: vi.fn().mockReturnValue(false),
+				addStreamMessage: vi.fn(),
+				getMessages: vi.fn().mockReturnValue([]),
+			} as any;
+		});
+		const resolveSkillsConfig = vi.fn().mockResolvedValue({
+			plugins,
+			skills: ["agent-browser", "test-user-skills"],
+		});
+
+		const handler = new ChatSessionHandler(adapter, {
+			cyrusHome,
+			chatRepositoryProvider: createStaticProvider(
+				chatRepositoryPaths,
+				repository,
+				"workspace-1",
+			),
+			runnerConfigBuilder: createMockRunnerConfigBuilder(),
+			createRunner,
+			resolveSkillsConfig,
+			onWebhookStart: vi.fn(),
+			onWebhookEnd: vi.fn(),
+			onStateChange: vi.fn().mockResolvedValue(undefined),
+			onClaudeError: vi.fn(),
+		});
+
+		await handler.handleEvent(event as any);
+
+		expect(resolveSkillsConfig).toHaveBeenCalledWith({
+			repository,
+			repositoryPaths: chatRepositoryPaths,
+		});
+		expect(capturedConfig.plugins).toEqual(plugins);
+		expect(capturedConfig.skills).toEqual([
+			"agent-browser",
+			"test-user-skills",
+		]);
+	});
+});
+
+describe("ChatSessionHandler session-initiation gate", () => {
+	function buildHandler(adapter: ChatPlatformAdapter<TestEvent>) {
+		const createRunner = vi.fn(
+			() =>
+				({
+					supportsStreamingInput: false,
+					start: vi.fn().mockResolvedValue({ sessionId: "session-1" }),
+					stop: vi.fn(),
+					isRunning: vi.fn().mockReturnValue(false),
+					isStreaming: vi.fn().mockReturnValue(false),
+					addStreamMessage: vi.fn(),
+					getMessages: vi.fn().mockReturnValue([]),
+				}) as any,
+		);
+		const handler = new ChatSessionHandler(adapter, {
+			cyrusHome: TEST_CYRUS_CHAT,
+			chatRepositoryProvider: createStaticProvider([]),
+			runnerConfigBuilder: createMockRunnerConfigBuilder(),
+			createRunner,
+			onWebhookStart: vi.fn(),
+			onWebhookEnd: vi.fn(),
+			onStateChange: vi.fn().mockResolvedValue(undefined),
+			onClaudeError: vi.fn(),
+		});
+		return { handler, createRunner };
+	}
+
+	it("ignores a non-initiating event when no session exists for the thread", async () => {
+		const adapter: ChatPlatformAdapter<TestEvent> = new TestChatAdapter(
+			"unbound-thread",
+		);
+		// Mark this event as a follow-up that must not start a session.
+		adapter.isSessionInitiatingEvent = () => false;
+
+		const { handler, createRunner } = buildHandler(adapter);
+		await handler.handleEvent({
+			eventId: "follow-up",
+			threadKey: "unbound-thread",
+		} as any);
+
+		expect(createRunner).not.toHaveBeenCalled();
+		expect(handler.listThreads()).toHaveLength(0);
+	});
+
+	it("starts a session for an initiating event", async () => {
+		const adapter: ChatPlatformAdapter<TestEvent> = new TestChatAdapter(
+			"bound-thread",
+		);
+		adapter.isSessionInitiatingEvent = () => true;
+
+		const { handler, createRunner } = buildHandler(adapter);
+		await handler.handleEvent({
+			eventId: "mention",
+			threadKey: "bound-thread",
+		} as any);
+
+		expect(createRunner).toHaveBeenCalledTimes(1);
+		expect(handler.listThreads()).toHaveLength(1);
+	});
+});
+
+describe("ChatSessionHandler processed acknowledgement", () => {
+	it("calls acknowledgeProcessed when the runner emits a result", async () => {
+		const adapter: ChatPlatformAdapter<TestEvent> = new TestChatAdapter(
+			"ack-thread",
+		);
+		const acknowledgeProcessed = vi.fn().mockResolvedValue(undefined);
+		adapter.acknowledgeProcessed = acknowledgeProcessed;
+
+		let capturedConfig: any;
+		const createRunner = vi.fn((config: any) => {
+			capturedConfig = config;
+			return {
+				supportsStreamingInput: false,
+				start: vi.fn().mockResolvedValue({ sessionId: "session-1" }),
+				stop: vi.fn(),
+				isRunning: vi.fn().mockReturnValue(false),
+				isStreaming: vi.fn().mockReturnValue(false),
+				addStreamMessage: vi.fn(),
+				getMessages: vi.fn().mockReturnValue([]),
+			} as any;
+		});
+		const handler = new ChatSessionHandler(adapter, {
+			cyrusHome: TEST_CYRUS_CHAT,
+			chatRepositoryProvider: createStaticProvider([]),
+			runnerConfigBuilder: createMockRunnerConfigBuilder(),
+			createRunner,
+			onWebhookStart: vi.fn(),
+			onWebhookEnd: vi.fn(),
+			onStateChange: vi.fn().mockResolvedValue(undefined),
+			onClaudeError: vi.fn(),
+		});
+
+		const event = { eventId: "mention", threadKey: "ack-thread" };
+		await handler.handleEvent(event as any);
+		expect(capturedConfig?.onMessage).toBeDefined();
+
+		await capturedConfig.onMessage({
+			type: "result",
+			subtype: "success",
+			is_error: false,
+			result: "done",
+			session_id: "session-1",
+		});
+		// acknowledgeProcessed is fire-and-forget — let the microtask settle
+		await new Promise((resolve) => setImmediate(resolve));
+
+		expect(acknowledgeProcessed).toHaveBeenCalledTimes(1);
+		expect(acknowledgeProcessed).toHaveBeenCalledWith(event);
+	});
+
+	it("acknowledges every queued message even when the agent merges them into fewer turns", async () => {
+		const adapter: ChatPlatformAdapter<TestEvent> = new TestChatAdapter(
+			"burst-thread",
+		);
+		const acknowledgeProcessed = vi.fn().mockResolvedValue(undefined);
+		adapter.acknowledgeProcessed = acknowledgeProcessed;
+		const postReply = vi
+			.spyOn(adapter, "postReply")
+			.mockResolvedValue(undefined);
+
+		let capturedConfig: any;
+		const createRunner = vi.fn((config: any) => {
+			capturedConfig = config;
+			return {
+				supportsStreamingInput: false,
+				start: vi.fn().mockResolvedValue({ sessionId: "session-1" }),
+				stop: vi.fn(),
+				// Running and streaming, so quick-succession follow-ups are
+				// injected into the live session via addStreamMessage.
+				isRunning: vi.fn().mockReturnValue(true),
+				isStreaming: vi.fn().mockReturnValue(true),
+				addStreamMessage: vi.fn(),
+				getMessages: vi.fn().mockReturnValue([]),
+			} as any;
+		});
+		const handler = new ChatSessionHandler(adapter, {
+			cyrusHome: TEST_CYRUS_CHAT,
+			chatRepositoryProvider: createStaticProvider([]),
+			runnerConfigBuilder: createMockRunnerConfigBuilder(),
+			createRunner,
+			onWebhookStart: vi.fn(),
+			onWebhookEnd: vi.fn(),
+			onStateChange: vi.fn().mockResolvedValue(undefined),
+			onClaudeError: vi.fn(),
+		});
+
+		// Three messages in quick succession: "Hi", "How are you?", "weather?"
+		const eventA = { eventId: "msg-a", threadKey: "burst-thread" };
+		const eventB = { eventId: "msg-b", threadKey: "burst-thread" };
+		const eventC = { eventId: "msg-c", threadKey: "burst-thread" };
+		await handler.handleEvent(eventA as any);
+		await handler.handleEvent(eventB as any);
+		await handler.handleEvent(eventC as any);
+
+		const result = {
+			type: "result",
+			subtype: "success",
+			is_error: false,
+			result: "done",
+			session_id: "session-1",
+		};
+		// The agent merges the queued prompts: 3 messages, only 2 results.
+		await capturedConfig.onMessage(result);
+		await capturedConfig.onMessage(result);
+		await new Promise((resolve) => setImmediate(resolve));
+
+		// Every message gets its reaction swapped — none left with stale 👀.
+		expect(acknowledgeProcessed).toHaveBeenCalledTimes(3);
+		expect(acknowledgeProcessed).toHaveBeenCalledWith(eventA);
+		expect(acknowledgeProcessed).toHaveBeenCalledWith(eventB);
+		expect(acknowledgeProcessed).toHaveBeenCalledWith(eventC);
+
+		// Both turn replies are posted: the first against the first queued
+		// event, the second via the remembered last event (queue already drained).
+		expect(postReply).toHaveBeenCalledTimes(2);
+		expect(postReply.mock.calls[0]?.[0]).toBe(eventA);
+		expect(postReply.mock.calls[1]?.[0]).toBe(eventC);
+	});
+});
+
+describe("ChatSessionHandler busy follow-up queueing", () => {
+	it("queues a follow-up that can't be streamed and delivers it after the turn", async () => {
+		const adapter: ChatPlatformAdapter<TestEvent> = new TestChatAdapter(
+			"busy-thread",
+		);
+		const notifyBusy = vi
+			.spyOn(adapter, "notifyBusy")
+			.mockResolvedValue(undefined);
+		vi.spyOn(adapter, "postReply").mockResolvedValue(undefined);
+
+		let running = false;
+		let capturedConfig: any;
+		const createRunner = vi.fn((config: any) => {
+			capturedConfig = config;
+			running = true; // a freshly created runner is running
+			return {
+				supportsStreamingInput: false,
+				start: vi.fn().mockResolvedValue({ sessionId: "session-1" }),
+				startStreaming: vi.fn().mockResolvedValue({ sessionId: "session-1" }),
+				stop: vi.fn(),
+				// Running, but NOT streamable (exec-style backend) — follow-ups
+				// can't be injected mid-turn.
+				isRunning: vi.fn(() => running),
+				isStreaming: vi.fn().mockReturnValue(false),
+				addStreamMessage: vi.fn(),
+				getMessages: vi.fn().mockReturnValue([]),
+			} as any;
+		});
+		const handler = new ChatSessionHandler(adapter, {
+			cyrusHome: TEST_CYRUS_CHAT,
+			chatRepositoryProvider: createStaticProvider([]),
+			runnerConfigBuilder: createMockRunnerConfigBuilder(),
+			createRunner,
+			onWebhookStart: vi.fn(),
+			onWebhookEnd: vi.fn(),
+			onStateChange: vi.fn().mockResolvedValue(undefined),
+			onClaudeError: vi.fn(),
+		});
+
+		// First message starts the session (running).
+		await handler.handleEvent({
+			eventId: "msg-a",
+			threadKey: "busy-thread",
+		} as any);
+		expect(createRunner).toHaveBeenCalledTimes(1);
+
+		// Second message arrives mid-turn → queued (not dropped) + user notified.
+		await handler.handleEvent({
+			eventId: "msg-b",
+			threadKey: "busy-thread",
+		} as any);
+		expect(notifyBusy).toHaveBeenCalledTimes(1);
+		expect(createRunner).toHaveBeenCalledTimes(1); // not yet delivered
+
+		// Turn completes → the queued follow-up is re-dispatched as a new turn.
+		running = false;
+		await capturedConfig.onMessage({
+			type: "result",
+			subtype: "success",
+			is_error: false,
+			result: "done",
+			session_id: "session-1",
+		});
+		await new Promise((resolve) => setTimeout(resolve, 50));
+
+		expect(createRunner).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe("SlackChatAdapter session initiation", () => {
+	it("treats app_mention as session-initiating", () => {
+		const adapter = new SlackChatAdapter(createStaticProvider([]));
+		expect(
+			adapter.isSessionInitiatingEvent({ eventType: "app_mention" } as any),
+		).toBe(true);
+	});
+
+	it("ignores a non-upstream-gated message (direct mode, unbound thread)", () => {
+		const adapter = new SlackChatAdapter(createStaticProvider([]));
+		expect(
+			adapter.isSessionInitiatingEvent({
+				eventType: "message",
+				upstreamGated: false,
+			} as any),
+		).toBe(false);
+	});
+
+	it("treats an upstream-gated message as session-initiating (proxy mode survives restart)", () => {
+		const adapter = new SlackChatAdapter(createStaticProvider([]));
+		expect(
+			adapter.isSessionInitiatingEvent({
+				eventType: "message",
+				upstreamGated: true,
+			} as any),
+		).toBe(true);
+	});
+});
+
+describe("SlackChatAdapter task instructions", () => {
+	const mentionEvent = (
+		text: string,
+		attachments?: SlackMessageAttachment[],
+	): SlackWebhookEvent => ({
+		eventType: "app_mention",
+		eventId: "Ev1",
+		teamId: "T1",
+		payload: {
+			type: "app_mention",
+			user: "U1",
+			channel: "C1",
+			text,
+			ts: "1700000000.000200",
+			event_ts: "1700000000.000200",
+			attachments,
+		},
+	});
+
+	it("folds a forwarded attachment body in alongside the comment", () => {
+		const adapter = new SlackChatAdapter(createStaticProvider([]));
+		expect(
+			adapter.extractTaskInstructions(
+				mentionEvent("<@U0BOT> please look", [
+					{
+						is_share: true,
+						author_name: "Sentry",
+						text: "[frontend] Error: page resources not found",
+					},
+				]),
+			),
+		).toBe(
+			"please look\n\n" +
+				"[Attachment from Sentry]\n" +
+				"[frontend] Error: page resources not found",
+		);
+	});
+
+	it("uses the forwarded attachment as the whole prompt when there is no comment", () => {
+		const adapter = new SlackChatAdapter(createStaticProvider([]));
+		expect(
+			adapter.extractTaskInstructions(
+				mentionEvent("<@U0BOT>", [
+					{ is_share: true, author_name: "Sentry", text: "alert body" },
+				]),
+			),
+		).toBe("[Attachment from Sentry]\nalert body");
+	});
+
+	it("falls back to the placeholder when neither comment nor attachment has content", () => {
+		const adapter = new SlackChatAdapter(createStaticProvider([]));
+		expect(adapter.extractTaskInstructions(mentionEvent("<@U0BOT>"))).toBe(
+			"Ask the user for more context",
+		);
+	});
+});
+
+describe("SlackChatAdapter responding policy", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+		delete process.env.SLACK_BOT_TOKEN;
+	});
+
+	const slackEvent = (text: string) =>
+		({
+			eventType: "message",
+			eventId: "Ev1",
+			teamId: "T1",
+			slackBotToken: "xoxb-test",
+			payload: {
+				type: "message",
+				user: "U1",
+				channel: "C1",
+				text,
+				ts: "1700000000.000200",
+				thread_ts: "1700000000.000100",
+				event_ts: "1700000000.000200",
+			},
+		}) as any;
+
+	const runnerWithReply = (text: string) =>
+		({
+			getMessages: () => [
+				{ type: "assistant", message: { content: [{ type: "text", text }] } },
+			],
+		}) as any;
+
+	it("documents the when-to-respond policy and the silence sentinel in the system prompt", () => {
+		const adapter = new SlackChatAdapter(createStaticProvider([]));
+		const prompt = adapter.buildSystemPrompt(slackEvent("anything"));
+		expect(prompt).toContain("## When to Respond");
+		expect(prompt).toContain("Someone addresses you directly");
+		expect(prompt).toContain(SLACK_NO_RESPONSE_SENTINEL);
+	});
+
+	it("does NOT post to Slack when the agent emits the no-response sentinel", async () => {
+		const adapter = new SlackChatAdapter(createStaticProvider([]));
+		const postSpy = vi
+			.spyOn(SlackMessageService.prototype, "postMessage")
+			.mockResolvedValue({} as any);
+
+		await adapter.postReply(
+			slackEvent("thanks team!"),
+			runnerWithReply(`  ${SLACK_NO_RESPONSE_SENTINEL}\n`),
+		);
+
+		expect(postSpy).not.toHaveBeenCalled();
+	});
+
+	it("does NOT post leaked deliberation surrounding the no-response sentinel", async () => {
+		const adapter = new SlackChatAdapter(createStaticProvider([]));
+		const postSpy = vi
+			.spyOn(SlackMessageService.prototype, "postMessage")
+			.mockResolvedValue({} as any);
+
+		await adapter.postReply(
+			slackEvent("how are you?"),
+			runnerWithReply(
+				`The user didn't address me by name, so I should stay quiet.\n${SLACK_NO_RESPONSE_SENTINEL}`,
+			),
+		);
+
+		expect(postSpy).not.toHaveBeenCalled();
+	});
+
+	it("posts to Slack when the agent produces a real reply", async () => {
+		const adapter = new SlackChatAdapter(createStaticProvider([]));
+		const postSpy = vi
+			.spyOn(SlackMessageService.prototype, "postMessage")
+			.mockResolvedValue({} as any);
+
+		await adapter.postReply(
+			slackEvent("Cyrus, what does this function do?"),
+			runnerWithReply("It memoizes the result."),
+		);
+
+		expect(postSpy).toHaveBeenCalledTimes(1);
+		expect(postSpy.mock.calls[0]?.[0]).toMatchObject({
+			channel: "C1",
+			text: "It memoizes the result.",
+			thread_ts: "1700000000.000100",
+		});
+	});
+
+	it("swaps the receipt reaction for the processed one after the turn completes", async () => {
+		const adapter = new SlackChatAdapter(createStaticProvider([]));
+		const addSpy = vi
+			.spyOn(SlackReactionService.prototype, "addReaction")
+			.mockResolvedValue(undefined);
+		const removeSpy = vi
+			.spyOn(SlackReactionService.prototype, "removeReaction")
+			.mockResolvedValue(undefined);
+
+		await adapter.acknowledgeProcessed(slackEvent("thanks team!"));
+
+		expect(removeSpy).toHaveBeenCalledTimes(1);
+		expect(removeSpy.mock.calls[0]?.[0]).toMatchObject({
+			channel: "C1",
+			timestamp: "1700000000.000200",
+			name: RECEIPT_REACTION,
+		});
+		expect(addSpy).toHaveBeenCalledTimes(1);
+		expect(addSpy.mock.calls[0]?.[0]).toMatchObject({
+			channel: "C1",
+			timestamp: "1700000000.000200",
+			name: PROCESSED_REACTION,
+		});
+		// Remove must precede add so both reactions are never visible together
+		expect(removeSpy.mock.invocationCallOrder[0]).toBeLessThan(
+			addSpy.mock.invocationCallOrder[0] ?? 0,
+		);
 	});
 });
 
@@ -195,6 +724,38 @@ describe("SlackChatAdapter system prompt", () => {
 		expect(systemPrompt).toContain("mcp__linear__get_user");
 		expect(systemPrompt).toContain('query: "me"');
 		expect(systemPrompt).toContain("linear_get_agent_sessions");
+	});
+
+	const appMentionEvent = {
+		payload: {
+			user: "U1",
+			channel: "C1",
+			text: "<@cyrus> hello",
+			ts: "1700000000.000100",
+			event_ts: "1700000000.000100",
+			type: "app_mention",
+		},
+	} as any;
+
+	it("includes stop-listening guidance with the Behaviours page link when a Cyrus app base URL is configured", () => {
+		const adapter = new SlackChatAdapter(createStaticProvider([]), undefined, {
+			cyrusAppBaseUrl: "https://app.atcyrus.com/",
+		});
+		const systemPrompt = adapter.buildSystemPrompt(appMentionEvent);
+
+		expect(systemPrompt).toContain("## Stopping Automatic Listening");
+		expect(systemPrompt).toContain(
+			`<https://app.atcyrus.com${BEHAVIOURS_PAGE_ROUTE}|Behaviours page>`,
+		);
+		expect(systemPrompt).toContain("until someone asks you a direct question");
+	});
+
+	it("omits stop-listening guidance when no Cyrus app base URL is configured (community)", () => {
+		const adapter = new SlackChatAdapter(createStaticProvider([]));
+		const systemPrompt = adapter.buildSystemPrompt(appMentionEvent);
+
+		expect(systemPrompt).not.toContain("## Stopping Automatic Listening");
+		expect(systemPrompt).not.toContain(BEHAVIOURS_PAGE_ROUTE);
 	});
 });
 

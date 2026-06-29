@@ -1,5 +1,10 @@
 import { getCyrusAppUrl } from "cyrus-cloudflare-tunnel-client";
-import type { EdgeWorkerConfig, Issue, RepositoryConfig } from "cyrus-core";
+import type {
+	EdgeWorkerConfig,
+	Issue,
+	RepoSetupHookEventHandler,
+	RepositoryConfig,
+} from "cyrus-core";
 import type { GitService, SharedApplicationServer } from "cyrus-edge-worker";
 import { EdgeWorker } from "cyrus-edge-worker";
 import { SlackEventTransport } from "cyrus-slack-event-transport";
@@ -194,10 +199,18 @@ export class WorkerService {
 			version: this.version,
 			repositories,
 			cyrusHome: this.cyrusHome,
-			defaultAllowedTools:
-				process.env.ALLOWED_TOOLS?.split(",").map((t) => t.trim()) || [],
+			linearAllowedTools:
+				process.env.LINEAR_ALLOWED_TOOLS?.split(",").map((t) => t.trim()) ||
+				edgeConfig.linearAllowedTools ||
+				[],
+			slackAllowedTools: edgeConfig.slackAllowedTools,
+			githubAllowedTools: edgeConfig.githubAllowedTools,
+			slackMcpConfigs: edgeConfig.slackMcpConfigs,
+			linearMcpConfigs: edgeConfig.linearMcpConfigs,
+			githubMcpConfigs: edgeConfig.githubMcpConfigs,
 			defaultDisallowedTools:
 				process.env.DISALLOWED_TOOLS?.split(",").map((t) => t.trim()) ||
+				edgeConfig.defaultDisallowedTools ||
 				undefined,
 			// Model configuration: environment variables take precedence over config file.
 			// Legacy env vars/keys are still accepted for backwards compatibility.
@@ -223,6 +236,7 @@ export class WorkerService {
 					| "cursor"
 					| undefined) || edgeConfig.defaultRunner,
 			issueUpdateTrigger: edgeConfig.issueUpdateTrigger,
+			prReviewTrigger: edgeConfig.prReviewTrigger,
 			promptDefaults: edgeConfig.promptDefaults,
 			linearWorkspaces: edgeConfig.linearWorkspaces,
 			webhookBaseUrl: process.env.CYRUS_BASE_URL,
@@ -239,12 +253,14 @@ export class WorkerService {
 					options?: {
 						baseBranchOverrides?: Map<string, string>;
 						branchPrefixOverrides?: Map<string, string>;
+						onRepoSetupHookEvent?: RepoSetupHookEventHandler;
 					},
 				): Promise<Workspace> => {
 					return this.gitService.createGitWorktree(issue, repositories, {
 						globalSetupScript: edgeConfig.global_setup_script,
 						baseBranchOverrides: options?.baseBranchOverrides,
 						branchPrefixOverrides: options?.branchPrefixOverrides,
+						onRepoSetupHookEvent: options?.onRepoSetupHookEvent,
 					});
 				},
 				onOAuthCallback,

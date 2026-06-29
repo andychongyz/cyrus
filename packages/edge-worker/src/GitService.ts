@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import {
 	existsSync,
 	mkdirSync,
@@ -13,6 +13,7 @@ import { basename, join, resolve as pathResolve } from "node:path";
 import type {
 	BaseBranchResolution,
 	Issue,
+	RepoSetupHookEventHandler,
 	RepositoryConfig,
 	Workspace,
 } from "cyrus-core";
@@ -22,6 +23,8 @@ import { WorktreeIncludeService } from "./WorktreeIncludeService.js";
 
 export interface CreateGitWorktreeOptions {
 	globalSetupScript?: string;
+	/** Called for repository setup hook lifecycle events. Global setup hooks do not emit events. */
+	onRepoSetupHookEvent?: RepoSetupHookEventHandler;
 	/**
 	 * Override workspace base directory. Required for 0-repo workspaces.
 	 * For 1+ repos, defaults to the first repository's workspaceBaseDir.
@@ -42,6 +45,174 @@ export interface CreateGitWorktreeOptions {
 
 export interface GitServiceOptions {
 	cyrusHome?: string;
+}
+
+export interface DeleteWorktreeOptions {
+	/**
+	 * Repositories involved with this issue's workspace. When provided, each
+	 * repo's `cyrus-teardown.sh` (if present) is invoked before worktree removal,
+	 * with `cwd` set to that repo's worktree subdirectory.
+	 *
+	 * In the single-repo layout, the worktree subdirectory is the workspace root.
+	 * In multi-repo layouts, it is `<workspace>/<repository.name>/`.
+	 */
+	repositories?: RepositoryConfig[];
+}
+
+/** Timeout for repo setup scripts (cyrus-setup.*). */
+const SETUP_TIMEOUT_MS = 5 * 60 * 1000;
+
+/** Timeout for repo teardown scripts (cyrus-teardown.*). */
+const TEARDOWN_TIMEOUT_MS = 2 * 60 * 1000;
+
+const HOOK_OUTPUT_TAIL_MAX_BYTES = 64 * 1024;
+const HOOK_OUTPUT_TAIL_MAX_CHARS = 8_000;
+const HOOK_OUTPUT_TAIL_MAX_LINES = 40;
+
+type HookKind = "setup" | "teardown";
+
+interface HookScriptOptions {
+	scriptPath: string;
+	hook: HookKind;
+	/** Origin of the script for user-facing log messages. */
+	originLabel: string;
+	/** Working directory for the spawned process. */
+	cwd: string;
+	/** Environment variables to merge with `process.env`. */
+	env: Record<string, string>;
+	/** Timeout in milliseconds for the spawned process. */
+	timeoutMs: number;
+	repositoryName?: string;
+	issueIdentifier?: string;
+	onRepoSetupHookEvent?: RepoSetupHookEventHandler;
+}
+
+interface NodeExecError {
+	signal?: string;
+	message?: string;
+	code?: number | string;
+}
+
+function isNodeExecError(value: unknown): value is NodeExecError {
+	return typeof value === "object" && value !== null;
+}
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function redactHookOutput(
+	output: string,
+	opts: { cwd: string; env: Record<string, string> },
+): string {
+	let redacted = output;
+	const pathValues = [opts.cwd, homedir(), process.cwd()]
+		.flatMap((pathValue) =>
+			pathValue.startsWith("/var/")
+				? [`/private${pathValue}`, pathValue]
+				: [pathValue],
+		)
+		.filter(Boolean);
+	for (const pathValue of pathValues) {
+		const isWorkspacePath =
+			pathValue === opts.cwd || pathValue === `/private${opts.cwd}`;
+		redacted = redacted.replace(
+			new RegExp(escapeRegExp(pathValue), "g"),
+			isWorkspacePath ? "[workspace]" : "[path]",
+		);
+	}
+	redacted = redacted.replace(/\/private\[workspace\]/g, "[workspace]");
+
+	redacted = redacted.replace(
+		/(?:\/Users|\/home|\/var\/folders|\/private\/tmp|\/tmp)\/[^\s'"`<>)]*/g,
+		"[path]",
+	);
+
+	redacted = redacted.replace(
+		/\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASS|API[_-]?KEY|AUTH|CREDENTIAL|PRIVATE|ACCESS[_-]?KEY|REFRESH[_-]?TOKEN|SESSION|COOKIE)[A-Z0-9_]*)\s*=\s*([^\s]+)/gi,
+		"$1=[REDACTED]",
+	);
+
+	const sensitiveEnvPattern =
+		/(TOKEN|SECRET|PASSWORD|PASS|API[_-]?KEY|AUTH|CREDENTIAL|PRIVATE|ACCESS[_-]?KEY|REFRESH[_-]?TOKEN|SESSION|COOKIE)/i;
+	const sensitiveValues = new Set<string>();
+	for (const [key, value] of Object.entries({ ...process.env, ...opts.env })) {
+		if (!sensitiveEnvPattern.test(key)) continue;
+		if (!value || value.length < 4) continue;
+		sensitiveValues.add(value);
+	}
+	for (const [key, value] of Object.entries(opts.env)) {
+		if (key === "LINEAR_ISSUE_IDENTIFIER") continue;
+		if (!value || value.length < 4) continue;
+		sensitiveValues.add(value);
+	}
+
+	for (const value of sensitiveValues) {
+		redacted = redacted.replace(
+			new RegExp(escapeRegExp(value), "g"),
+			"[REDACTED]",
+		);
+	}
+
+	redacted = redacted
+		.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]")
+		.replace(/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,}\b/g, "[REDACTED]")
+		.replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "[REDACTED]")
+		.replace(/\bsk-[A-Za-z0-9_-]{20,}\b/g, "[REDACTED]")
+		.replace(/\bxox[baprs]-[A-Za-z0-9-]{20,}\b/g, "[REDACTED]");
+
+	return redacted;
+}
+
+function truncateHookOutputTail(output: string): {
+	text: string;
+	truncated: boolean;
+} {
+	const lines = output.split(/\r?\n/);
+	let truncated = false;
+	let selectedLines = lines;
+	if (lines.length > HOOK_OUTPUT_TAIL_MAX_LINES) {
+		truncated = true;
+		selectedLines = lines.slice(-HOOK_OUTPUT_TAIL_MAX_LINES);
+	}
+
+	let tail = selectedLines.join("\n");
+	if (tail.length > HOOK_OUTPUT_TAIL_MAX_CHARS) {
+		truncated = true;
+		tail = tail.slice(-HOOK_OUTPUT_TAIL_MAX_CHARS);
+	}
+
+	return { text: tail.trim(), truncated };
+}
+
+class HookOutputCollector {
+	private chunks: string[] = [];
+	private bytes = 0;
+
+	append(chunk: Buffer | string): void {
+		const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : chunk;
+		this.chunks.push(text);
+		this.bytes += Buffer.byteLength(text, "utf8");
+
+		while (this.bytes > HOOK_OUTPUT_TAIL_MAX_BYTES && this.chunks.length > 1) {
+			const removed = this.chunks.shift() ?? "";
+			this.bytes -= Buffer.byteLength(removed, "utf8");
+		}
+
+		if (this.bytes > HOOK_OUTPUT_TAIL_MAX_BYTES && this.chunks.length === 1) {
+			const current = this.chunks[0] ?? "";
+			const sliced = current.slice(-HOOK_OUTPUT_TAIL_MAX_BYTES);
+			this.chunks[0] = sliced;
+			this.bytes = Buffer.byteLength(sliced, "utf8");
+		}
+	}
+
+	tail(opts: { cwd: string; env: Record<string, string> }): {
+		text: string;
+		truncated: boolean;
+	} {
+		return truncateHookOutputTail(redactHookOutput(this.chunks.join(""), opts));
+	}
 }
 
 /**
@@ -143,98 +314,32 @@ export class GitService {
 	}
 
 	/**
-	 * Run a setup script with proper error handling and logging
+	 * Resolve mutable Git metadata directories for an entire workspace,
+	 * including every repository in a multi-repo session.
+	 *
+	 * For single-repo workspaces `workspace.path` is itself the worktree, so
+	 * resolving from it is sufficient. For multi-repo workspaces, however,
+	 * `workspace.path` is a plain parent container (not a git repo) and each
+	 * repository lives in a sub-worktree under `workspace.repoPaths`. Each of
+	 * those sub-worktrees has its own linked git metadata (for example
+	 * `<mainRepo>/.git/worktrees/<name>/`) that must be writable by sandboxes —
+	 * resolving only from the container would miss them entirely, breaking
+	 * `git add`/`git merge`/etc. with "Operation not permitted".
 	 */
-	private async runSetupScript(
-		scriptPath: string,
-		scriptType: "global" | "repository",
-		workspacePath: string,
-		issue: Issue,
-	): Promise<void> {
-		// Expand ~ to home directory
-		const expandedPath = scriptPath.replace(/^~/, homedir());
+	public getGitMetadataDirectoriesForWorkspace(workspace: Workspace): string[] {
+		const candidateWorkingDirs = new Set<string>([
+			workspace.path,
+			...Object.values(workspace.repoPaths ?? {}),
+		]);
 
-		// Check if script exists
-		if (!existsSync(expandedPath)) {
-			this.logger.warn(
-				`⚠️  ${scriptType === "global" ? "Global" : "Repository"} setup script not found: ${scriptPath}`,
-			);
-			return;
-		}
-
-		// Check if script is executable (Unix only)
-		if (process.platform !== "win32") {
-			try {
-				const stats = statSync(expandedPath);
-				// Check if file has execute permission for the owner
-				if (!(stats.mode & 0o100)) {
-					this.logger.warn(
-						`⚠️  ${scriptType === "global" ? "Global" : "Repository"} setup script is not executable: ${scriptPath}`,
-					);
-					this.logger.warn(`   Run: chmod +x "${expandedPath}"`);
-					return;
-				}
-			} catch (error) {
-				this.logger.warn(
-					`⚠️  Cannot check permissions for ${scriptType} setup script: ${(error as Error).message}`,
-				);
-				return;
+		const resolvedDirectories = new Set<string>();
+		for (const workingDir of candidateWorkingDirs) {
+			for (const metadataDir of this.getGitMetadataDirectories(workingDir)) {
+				resolvedDirectories.add(metadataDir);
 			}
 		}
 
-		const scriptName = basename(expandedPath);
-		this.logger.info(`ℹ️  Running ${scriptType} setup script: ${scriptName}`);
-
-		try {
-			// Determine the command based on the script extension and platform
-			let command: string;
-			const isWindows = process.platform === "win32";
-
-			if (scriptPath.endsWith(".ps1")) {
-				command = `powershell -ExecutionPolicy Bypass -File "${expandedPath}"`;
-			} else if (scriptPath.endsWith(".cmd") || scriptPath.endsWith(".bat")) {
-				command = `"${expandedPath}"`;
-			} else if (isWindows) {
-				// On Windows, try to run with bash if available (Git Bash/WSL)
-				command = `bash "${expandedPath}"`;
-			} else {
-				// On Unix, run directly with bash
-				command = `bash "${expandedPath}"`;
-			}
-
-			execSync(command, {
-				cwd: workspacePath,
-				stdio: "inherit",
-				env: {
-					...process.env,
-					LINEAR_ISSUE_ID: issue.id,
-					LINEAR_ISSUE_IDENTIFIER: issue.identifier,
-					LINEAR_ISSUE_TITLE: issue.title || "",
-				},
-				timeout: 5 * 60 * 1000, // 5 minute timeout
-			});
-
-			this.logger.info(
-				`✅ ${scriptType === "global" ? "Global" : "Repository"} setup script completed successfully`,
-			);
-		} catch (error) {
-			const errorMessage =
-				(error as any).signal === "SIGTERM"
-					? "Script execution timed out (exceeded 5 minutes)"
-					: (error as Error).message;
-
-			this.logger.error(
-				`❌ ${scriptType === "global" ? "Global" : "Repository"} setup script failed: ${errorMessage}`,
-			);
-
-			// Log stderr if available
-			if ((error as any).stderr) {
-				this.logger.error("   stderr:", (error as any).stderr.toString());
-			}
-
-			// Continue execution despite setup script failure
-			this.logger.info(`   Continuing with worktree creation...`);
-		}
+		return [...resolvedDirectories];
 	}
 
 	/**
@@ -478,6 +583,7 @@ export class GitService {
 	): Promise<Workspace> {
 		const {
 			globalSetupScript,
+			onRepoSetupHookEvent,
 			workspaceBaseDir: overrideBaseDir,
 			baseBranchOverrides,
 			branchPrefixOverrides,
@@ -527,6 +633,7 @@ export class GitService {
 				undefined,
 				overrideValue,
 				branchPrefixOverrides?.get(repoId),
+				onRepoSetupHookEvent,
 			);
 		}
 
@@ -560,6 +667,7 @@ export class GitService {
 					repoSubPath, // override workspace path for N-repo layout
 					baseBranchOverrides?.get(repository.id),
 					branchPrefixOverrides?.get(repository.id),
+					onRepoSetupHookEvent,
 				);
 				repoPaths[repository.id] = repoWorkspace.path;
 				if (repoWorkspace.resolvedBaseBranches) {
@@ -600,6 +708,7 @@ export class GitService {
 		workspacePathOverride?: string,
 		baseBranchOverride?: string,
 		branchPrefixOverride?: string,
+		onRepoSetupHookEvent?: RepoSetupHookEventHandler,
 	): Promise<Workspace> {
 		this.logger.info(
 			`createSingleRepoWorktree for ${repository.name} (id=${repository.id}): baseBranchOverride=${baseBranchOverride ?? "undefined"}`,
@@ -885,9 +994,10 @@ export class GitService {
 
 			// Then, check for repository setup scripts (cross-platform)
 			await this.runRepoSetupScript(
-				repository.repositoryPath,
 				workspacePath,
 				issue,
+				repository.name,
+				onRepoSetupHookEvent,
 			);
 
 			return {
@@ -935,9 +1045,19 @@ export class GitService {
 	 * handling both single-repo and multi-repo layouts since the issue identifier
 	 * directory is the root in both cases.
 	 *
+	 * If `options.repositories` is supplied, each repo's per-repo
+	 * `cyrus-teardown.sh` (if present in its repo root) is invoked **before**
+	 * the worktrees are removed, with `cwd` set to that repo's worktree
+	 * subdirectory. A failure in one repo's teardown does not block the others
+	 * or the final `rmSync`.
+	 *
 	 * @param issueIdentifier - The issue identifier (e.g., "DEF-123")
+	 * @param options - Optional teardown wiring (see {@link DeleteWorktreeOptions})
 	 */
-	deleteWorktree(issueIdentifier: string): void {
+	async deleteWorktree(
+		issueIdentifier: string,
+		options: DeleteWorktreeOptions = {},
+	): Promise<void> {
 		const workspacePath = join(
 			getDefaultWorktreesDir(this.cyrusHome),
 			issueIdentifier,
@@ -957,6 +1077,14 @@ export class GitService {
 		// Find all git worktrees that are within this workspace path.
 		// In multi-repo layouts, there may be subdirectories that are each worktrees.
 		const worktreePaths = this.findWorktreesUnderPath(workspacePath);
+
+		// Run per-repo teardown scripts before any worktree is torn down.
+		// Each repo's script runs with cwd set to its own worktree subdirectory.
+		await this.runTeardownsForIssue({
+			issueIdentifier,
+			workspacePath,
+			repositories: options.repositories,
+		});
 
 		// Stop Spring preloader processes before deleting — best-effort, safe if Spring
 		// is not installed or not running (spring stop exits 0 in both cases).
@@ -1022,6 +1150,62 @@ export class GitService {
 				});
 			} catch {
 				// Best-effort: prune failure is not critical
+			}
+		}
+	}
+
+	/**
+	 * Run per-repo teardown scripts for each repository whose worktree is about
+	 * to be removed. Prefers the explicit `repositories` list passed by the
+	 * caller (source-of-truth from the session manager); falls back to inferring
+	 * the repo mapping from `worktreePaths` (filesystem-driven) — i.e. matches
+	 * each worktree subdirectory to a configured `RepositoryConfig` by
+	 * `repository.repositoryPath`.
+	 *
+	 * Each repo's teardown runs with `cwd` set to its own worktree subdirectory.
+	 * Failures are isolated: one repo failing does not skip subsequent repos
+	 * and does not block worktree deletion.
+	 */
+	private async runTeardownsForIssue(opts: {
+		issueIdentifier: string;
+		workspacePath: string;
+		repositories?: RepositoryConfig[];
+	}): Promise<void> {
+		const { issueIdentifier, workspacePath, repositories } = opts;
+
+		// Build the worktree cwd list. Prefer the explicit list from the caller.
+		const targets: string[] = [];
+
+		if (repositories && repositories.length > 0) {
+			if (repositories.length === 1) {
+				// Single-repo layout: workspace root IS the worktree.
+				targets.push(workspacePath);
+			} else {
+				// Multi-repo layout: each repo's worktree is a named subdir.
+				for (const repo of repositories) {
+					targets.push(join(workspacePath, repo.name));
+				}
+			}
+		}
+
+		if (targets.length === 0) {
+			// No repos provided — nothing to do. The filesystem-driven fallback
+			// would require the caller to provide a repository registry, which
+			// the EdgeWorker is the source of truth for. Without it we skip
+			// teardown rather than guessing.
+			return;
+		}
+
+		for (const workspacePath of targets) {
+			try {
+				await this.runRepoTeardownScript(workspacePath, issueIdentifier);
+			} catch (error) {
+				// runRepoTeardownScript already swallows execSync failures and
+				// logs them; this catch is defensive against unexpected throws
+				// (e.g. unreadable directory) so one bad repo cannot abort the loop.
+				this.logger.error(
+					`Unexpected error running teardown for ${workspacePath}: ${(error as Error).message}`,
+				);
 			}
 		}
 	}
@@ -1104,53 +1288,398 @@ export class GitService {
 	 * Find and run a repository-specific setup script (cyrus-setup.sh/.ps1/.cmd/.bat)
 	 */
 	private async runRepoSetupScript(
-		repositoryPath: string,
 		workspacePath: string,
 		issue: Issue,
+		repositoryName?: string,
+		onRepoSetupHookEvent?: RepoSetupHookEventHandler,
 	): Promise<void> {
+		await this.runRepoHookScript({
+			hook: "setup",
+			workspacePath,
+			env: {
+				LINEAR_ISSUE_ID: issue.id,
+				LINEAR_ISSUE_IDENTIFIER: issue.identifier,
+				LINEAR_ISSUE_TITLE: issue.title || "",
+			},
+			timeoutMs: SETUP_TIMEOUT_MS,
+			repositoryName,
+			issueIdentifier: issue.identifier,
+			onRepoSetupHookEvent,
+		});
+	}
+
+	/**
+	 * Find and run a repository-specific teardown script (cyrus-teardown.sh/.ps1/.cmd/.bat).
+	 *
+	 * Mirrors {@link runRepoSetupScript} but is invoked from {@link deleteWorktree}
+	 * immediately before the worktree subdirectory is removed. Only
+	 * `LINEAR_ISSUE_IDENTIFIER` is guaranteed in the teardown environment because
+	 * the terminal-state message bus path does not carry the full Issue object.
+	 */
+	private async runRepoTeardownScript(
+		workspacePath: string,
+		issueIdentifier: string,
+	): Promise<void> {
+		await this.runRepoHookScript({
+			hook: "teardown",
+			workspacePath,
+			env: {
+				LINEAR_ISSUE_IDENTIFIER: issueIdentifier,
+			},
+			timeoutMs: TEARDOWN_TIMEOUT_MS,
+		});
+	}
+
+	/**
+	 * Shared discovery+dispatch for repo-scoped hook scripts (setup and teardown).
+	 * Looks in `workspacePath` for `cyrus-<hook>.{sh,ps1,cmd,bat}` and runs the
+	 * first compatible variant with `cwd` set to `workspacePath`.
+	 */
+	private async runRepoHookScript(opts: {
+		hook: HookKind;
+		workspacePath: string;
+		env: Record<string, string>;
+		timeoutMs: number;
+		repositoryName?: string;
+		issueIdentifier?: string;
+		onRepoSetupHookEvent?: RepoSetupHookEventHandler;
+	}): Promise<void> {
 		const isWindows = process.platform === "win32";
-		const setupScripts = [
-			{
-				file: "cyrus-setup.sh",
-				platform: "unix",
-			},
-			{
-				file: "cyrus-setup.ps1",
-				platform: "windows",
-			},
-			{
-				file: "cyrus-setup.cmd",
-				platform: "windows",
-			},
-			{
-				file: "cyrus-setup.bat",
-				platform: "windows",
-			},
+		const candidates = [
+			{ file: `cyrus-${opts.hook}.sh`, platform: "unix" as const },
+			{ file: `cyrus-${opts.hook}.ps1`, platform: "windows" as const },
+			{ file: `cyrus-${opts.hook}.cmd`, platform: "windows" as const },
+			{ file: `cyrus-${opts.hook}.bat`, platform: "windows" as const },
 		];
 
-		// Find the first available setup script for the current platform
-		const availableScript = setupScripts.find((script) => {
-			const scriptPath = join(repositoryPath, script.file);
+		const available = candidates.find((c) => {
+			const scriptPath = join(opts.workspacePath, c.file);
 			const isCompatible = isWindows
-				? script.platform === "windows"
-				: script.platform === "unix";
+				? c.platform === "windows"
+				: c.platform === "unix";
 			return existsSync(scriptPath) && isCompatible;
 		});
 
-		// Fallback: on Windows, try bash if no Windows scripts found (for Git Bash/WSL users)
-		const fallbackScript =
-			!availableScript && isWindows
-				? setupScripts.find((script) => {
-						const scriptPath = join(repositoryPath, script.file);
-						return script.platform === "unix" && existsSync(scriptPath);
+		// Windows fallback: try bash variant when no Windows-native script exists.
+		const fallback =
+			!available && isWindows
+				? candidates.find((c) => {
+						const scriptPath = join(opts.workspacePath, c.file);
+						return c.platform === "unix" && existsSync(scriptPath);
 					})
 				: null;
 
-		const scriptToRun = availableScript || fallbackScript;
+		const scriptToRun = available || fallback;
+		if (!scriptToRun) return;
 
-		if (scriptToRun) {
-			const scriptPath = join(repositoryPath, scriptToRun.file);
-			await this.runSetupScript(scriptPath, "repository", workspacePath, issue);
+		const scriptPath = join(opts.workspacePath, scriptToRun.file);
+		await this.runHookScript({
+			scriptPath,
+			hook: opts.hook,
+			originLabel: "repository",
+			cwd: opts.workspacePath,
+			env: opts.env,
+			timeoutMs: opts.timeoutMs,
+			repositoryName: opts.repositoryName,
+			issueIdentifier: opts.issueIdentifier,
+			onRepoSetupHookEvent: opts.onRepoSetupHookEvent,
+		});
+	}
+
+	private async emitRepoSetupHookEvent(
+		handler: RepoSetupHookEventHandler | undefined,
+		event: Parameters<RepoSetupHookEventHandler>[0],
+	): Promise<void> {
+		if (!handler) return;
+		try {
+			await handler(event);
+		} catch (error) {
+			this.logger.warn(
+				`Failed to post repository setup hook activity: ${(error as Error).message}`,
+			);
 		}
+	}
+
+	/**
+	 * Run a hook script (setup or teardown) with proper error handling and logging.
+	 * Failure is non-blocking — errors are logged and execution continues.
+	 */
+	private async runHookScript(opts: HookScriptOptions): Promise<void> {
+		const {
+			scriptPath,
+			hook,
+			originLabel,
+			cwd,
+			env,
+			timeoutMs,
+			repositoryName,
+			issueIdentifier,
+			onRepoSetupHookEvent,
+		} = opts;
+
+		// Expand ~ to home directory
+		const expandedPath = scriptPath.replace(/^~/, homedir());
+		const labelTitle = `${originLabel.charAt(0).toUpperCase()}${originLabel.slice(1)} ${hook}`;
+		const scriptName = basename(expandedPath);
+		const shouldPostRepoSetupActivity = Boolean(
+			originLabel === "repository" &&
+				hook === "setup" &&
+				issueIdentifier &&
+				onRepoSetupHookEvent,
+		);
+		const startedAt = Date.now();
+
+		if (!existsSync(expandedPath)) {
+			this.logger.warn(`⚠️  ${labelTitle} script not found: ${scriptPath}`);
+			return;
+		}
+
+		const runsThroughInterpreter =
+			expandedPath.endsWith(".sh") || expandedPath.endsWith(".ps1");
+
+		// Preserve legacy permission checks outside the Linear-visible repo setup
+		// path. For visible repo setup hooks, interpreter-run scripts do not need
+		// the executable bit because we invoke them as `bash script`.
+		if (
+			process.platform !== "win32" &&
+			(!shouldPostRepoSetupActivity || !runsThroughInterpreter)
+		) {
+			try {
+				const stats = statSync(expandedPath);
+				if (!(stats.mode & 0o100)) {
+					this.logger.warn(
+						`⚠️  ${labelTitle} script is not executable: ${scriptPath}`,
+					);
+					this.logger.warn(`   Run: chmod +x "${expandedPath}"`);
+					if (shouldPostRepoSetupActivity) {
+						await this.emitRepoSetupHookEvent(onRepoSetupHookEvent, {
+							status: "failed",
+							issueIdentifier: issueIdentifier!,
+							scriptName,
+							repositoryName,
+							durationMs: Date.now() - startedAt,
+							errorMessage: "Repository setup hook is not executable",
+							stderrTail:
+								"Make cyrus-setup.sh executable in the repository and commit the executable bit: git update-index --chmod=+x cyrus-setup.sh",
+							truncated: false,
+						});
+					}
+					return;
+				}
+			} catch (error) {
+				this.logger.warn(
+					`⚠️  Cannot check permissions for ${labelTitle.toLowerCase()} script: ${(error as Error).message}`,
+				);
+				return;
+			}
+		}
+
+		this.logger.info(
+			`ℹ️  Running ${labelTitle.toLowerCase()} script: ${scriptName}`,
+		);
+
+		if (shouldPostRepoSetupActivity) {
+			await this.emitRepoSetupHookEvent(onRepoSetupHookEvent, {
+				status: "started",
+				issueIdentifier: issueIdentifier!,
+				scriptName,
+				repositoryName,
+			});
+		}
+
+		try {
+			if (!shouldPostRepoSetupActivity) {
+				this.runHookScriptInherited({
+					scriptPath,
+					expandedPath,
+					cwd,
+					env,
+					timeoutMs,
+				});
+
+				this.logger.info(`✅ ${labelTitle} script completed successfully`);
+				return;
+			}
+
+			let command: string;
+			let args: string[];
+			let shell = false;
+			const isWindows = process.platform === "win32";
+			if (scriptPath.endsWith(".ps1")) {
+				command = "powershell";
+				args = ["-ExecutionPolicy", "Bypass", "-File", expandedPath];
+			} else if (scriptPath.endsWith(".cmd") || scriptPath.endsWith(".bat")) {
+				command = expandedPath;
+				args = [];
+				shell = true;
+			} else if (isWindows) {
+				command = "bash";
+				args = [expandedPath];
+			} else {
+				command = "bash";
+				args = [expandedPath];
+			}
+
+			const stdoutCollector = new HookOutputCollector();
+			const stderrCollector = new HookOutputCollector();
+			await new Promise<void>((resolve, reject) => {
+				const child = spawn(command, args, {
+					cwd,
+					env: {
+						...process.env,
+						...env,
+					},
+					shell,
+				});
+				let timedOut = false;
+				const timeout = setTimeout(() => {
+					timedOut = true;
+					child.kill("SIGTERM");
+				}, timeoutMs);
+
+				child.stdout?.on("data", (chunk: Buffer) => {
+					stdoutCollector.append(chunk);
+					process.stdout.write(chunk);
+				});
+				child.stderr?.on("data", (chunk: Buffer) => {
+					stderrCollector.append(chunk);
+					process.stderr.write(chunk);
+				});
+				child.on("error", (error) => {
+					clearTimeout(timeout);
+					(error as NodeExecError).message = error.message;
+					reject(error);
+				});
+				child.on("close", (code, signal) => {
+					clearTimeout(timeout);
+					if (code === 0) {
+						resolve();
+						return;
+					}
+					const error = new Error(
+						timedOut
+							? "Script execution timed out"
+							: `Script exited with code ${code ?? "unknown"}${signal ? ` (${signal})` : ""}`,
+					) as Error &
+						NodeExecError & { stdoutTail?: string; stderrTail?: string };
+					error.code = code === null ? undefined : code;
+					error.signal = timedOut ? "SIGTERM" : (signal ?? undefined);
+					const stdoutTail = stdoutCollector.tail({ cwd, env });
+					const stderrTail = stderrCollector.tail({ cwd, env });
+					error.stdoutTail = stdoutTail.text;
+					error.stderrTail = stderrTail.text;
+					(
+						error as typeof error & { outputTruncated?: boolean }
+					).outputTruncated = stdoutTail.truncated || stderrTail.truncated;
+					reject(error);
+				});
+			});
+
+			this.logger.info(`✅ ${labelTitle} script completed successfully`);
+			if (shouldPostRepoSetupActivity) {
+				await this.emitRepoSetupHookEvent(onRepoSetupHookEvent, {
+					status: "succeeded",
+					issueIdentifier: issueIdentifier!,
+					scriptName,
+					repositoryName,
+					durationMs: Date.now() - startedAt,
+				});
+			}
+		} catch (error) {
+			const timeoutMinutes = Math.round(timeoutMs / 60_000);
+			const isTimeout = isNodeExecError(error) && error.signal === "SIGTERM";
+			const errorMessage = isTimeout
+				? `Script execution timed out (exceeded ${timeoutMinutes} minute${timeoutMinutes === 1 ? "" : "s"})`
+				: error instanceof Error
+					? error.message
+					: String(error);
+
+			this.logger.error(`❌ ${labelTitle} script failed: ${errorMessage}`);
+			this.logger.info(`   Continuing despite ${hook} script failure...`);
+			if (shouldPostRepoSetupActivity) {
+				const nodeError = error as NodeExecError & {
+					stdoutTail?: unknown;
+					stderrTail?: unknown;
+					outputTruncated?: unknown;
+				};
+				const stdoutTail =
+					typeof nodeError.stdoutTail === "string"
+						? nodeError.stdoutTail
+						: undefined;
+				const stderrTail =
+					typeof nodeError.stderrTail === "string"
+						? nodeError.stderrTail
+						: undefined;
+				await this.emitRepoSetupHookEvent(onRepoSetupHookEvent, {
+					status: "failed",
+					issueIdentifier: issueIdentifier!,
+					scriptName,
+					repositoryName,
+					durationMs: Date.now() - startedAt,
+					exitCode:
+						typeof nodeError.code === "number" ? nodeError.code : undefined,
+					signal: nodeError.signal,
+					errorMessage: redactHookOutput(errorMessage, { cwd, env }),
+					stdoutTail,
+					stderrTail,
+					truncated: nodeError.outputTruncated === true,
+				});
+			}
+		}
+	}
+
+	private runHookScriptInherited(opts: {
+		scriptPath: string;
+		expandedPath: string;
+		cwd: string;
+		env: Record<string, string>;
+		timeoutMs: number;
+	}): void {
+		const { scriptPath, expandedPath, cwd, env, timeoutMs } = opts;
+		let command: string;
+		const isWindows = process.platform === "win32";
+		if (scriptPath.endsWith(".ps1")) {
+			command = `powershell -ExecutionPolicy Bypass -File "${expandedPath}"`;
+		} else if (scriptPath.endsWith(".cmd") || scriptPath.endsWith(".bat")) {
+			command = `"${expandedPath}"`;
+		} else if (isWindows) {
+			command = `bash "${expandedPath}"`;
+		} else {
+			command = `bash "${expandedPath}"`;
+		}
+
+		execSync(command, {
+			cwd,
+			stdio: "inherit",
+			env: {
+				...process.env,
+				...env,
+			},
+			timeout: timeoutMs,
+		});
+	}
+
+	/**
+	 * Find and run a global setup script (path resolved from EdgeConfig).
+	 * Kept as a thin wrapper to preserve the existing call sites.
+	 */
+	private async runSetupScript(
+		scriptPath: string,
+		scriptType: "global" | "repository",
+		workspacePath: string,
+		issue: Issue,
+	): Promise<void> {
+		await this.runHookScript({
+			scriptPath,
+			hook: "setup",
+			originLabel: scriptType,
+			cwd: workspacePath,
+			env: {
+				LINEAR_ISSUE_ID: issue.id,
+				LINEAR_ISSUE_IDENTIFIER: issue.identifier,
+				LINEAR_ISSUE_TITLE: issue.title || "",
+			},
+			timeoutMs: SETUP_TIMEOUT_MS,
+		});
 	}
 }

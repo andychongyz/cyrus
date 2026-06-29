@@ -64,7 +64,7 @@ export class RunnerSelectionService {
 		if (runnerType === "cursor") {
 			return this.config.cursorDefaultModel || "composer-2.5";
 		}
-		return this.config.codexDefaultModel || "gpt-5.3-codex";
+		return this.config.codexDefaultModel || "gpt-5.5";
 	}
 
 	/**
@@ -162,6 +162,7 @@ export class RunnerSelectionService {
 			const normalizedModel = model.toLowerCase();
 			if (normalizedModel.startsWith("gemini")) return "gemini";
 			if (
+				normalizedModel === "fable" ||
 				normalizedModel === "opus" ||
 				normalizedModel === "sonnet" ||
 				normalizedModel === "haiku" ||
@@ -179,6 +180,7 @@ export class RunnerSelectionService {
 		): string | undefined => {
 			const normalizedModel = model.toLowerCase();
 			if (runnerType === "claude") {
+				if (normalizedModel === "fable") return "opus";
 				if (normalizedModel === "opus") return "sonnet";
 				if (normalizedModel === "sonnet") return "haiku";
 				// Keep haiku fallback on sonnet for retry behavior
@@ -238,7 +240,7 @@ export class RunnerSelectionService {
 			lowercaseLabels: string[],
 		): string | undefined => {
 			const codexModelLabel = lowercaseLabels.find((label) =>
-				/gpt-[a-z0-9.-]*codex/i.test(label),
+				isCodexModel(label),
 			);
 			if (codexModelLabel) {
 				return codexModelLabel;
@@ -264,6 +266,7 @@ export class RunnerSelectionService {
 				return "gemini-3-pro-preview";
 			}
 
+			if (lowercaseLabels.includes("fable")) return "fable";
 			if (lowercaseLabels.includes("opus")) return "opus";
 			if (lowercaseLabels.includes("sonnet")) return "sonnet";
 			if (lowercaseLabels.includes("haiku")) return "haiku";
@@ -301,18 +304,22 @@ export class RunnerSelectionService {
 			modelOverride = undefined;
 		}
 
-		if (!modelOverride) {
-			modelOverride = defaultModelByRunner[runnerType];
-		}
+		const resolvedModelOverride =
+			modelOverride ||
+			defaultModelByRunner[runnerType] ||
+			this.getDefaultModelForRunner(runnerType);
 
-		let fallbackModelOverride = inferFallbackModel(modelOverride, runnerType);
+		let fallbackModelOverride = inferFallbackModel(
+			resolvedModelOverride,
+			runnerType,
+		);
 		if (!fallbackModelOverride) {
 			fallbackModelOverride = defaultFallbackByRunner[runnerType];
 		}
 
 		return {
 			runnerType,
-			modelOverride,
+			modelOverride: resolvedModelOverride,
 			fallbackModelOverride,
 		};
 	}

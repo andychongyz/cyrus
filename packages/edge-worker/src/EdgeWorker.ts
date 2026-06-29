@@ -17,6 +17,7 @@ import {
 	HttpSessionStore,
 	normalizeMcpHttpTransport,
 } from "cyrus-claude-runner";
+import { getCyrusAppUrl } from "cyrus-cloudflare-tunnel-client";
 import { CodexRunner } from "cyrus-codex-runner";
 import { ConfigUpdater } from "cyrus-config-updater";
 import type {
@@ -130,6 +131,9 @@ import {
 import {
 	type CyrusToolsOptions,
 	createCyrusToolsServer,
+	createFetchFailureModesClient,
+	type FailureModesHttpClient,
+	type ResolvedSession,
 } from "cyrus-mcp-tools";
 import {
 	SlackEventTransport,
@@ -162,7 +166,10 @@ import {
 	RepositoryRouter,
 	type RepositoryRouterDeps,
 } from "./RepositoryRouter.js";
-import { RunnerConfigBuilder } from "./RunnerConfigBuilder.js";
+import {
+	RunnerConfigBuilder,
+	resolveIssueMcpConfigPath,
+} from "./RunnerConfigBuilder.js";
 import { RunnerSelectionService } from "./RunnerSelectionService.js";
 import { SharedApplicationServer } from "./SharedApplicationServer.js";
 import {
@@ -287,9 +294,30 @@ export class EdgeWorker extends EventEmitter {
 		}
 	>();
 
+	/**
+	 * Resolve `~/` prefixes in path-bearing config fields that are otherwise
+	 * passed verbatim to `fs.readFileSync` (which does not expand tildes).
+	 * Repository-scoped paths are normalized separately in addNew /
+	 * updateModified; this covers the platform-level MCP config lists that
+	 * cyrus-hosted writes with literal `~/.cyrus/...` prefixes when
+	 * generating self-host config.
+	 */
+	private static normalizeConfigPaths(
+		config: EdgeWorkerConfig,
+	): EdgeWorkerConfig {
+		const resolveList = (paths: string[] | undefined): string[] | undefined =>
+			paths ? paths.map(resolvePath) : undefined;
+		return {
+			...config,
+			slackMcpConfigs: resolveList(config.slackMcpConfigs),
+			linearMcpConfigs: resolveList(config.linearMcpConfigs),
+			githubMcpConfigs: resolveList(config.githubMcpConfigs),
+		};
+	}
+
 	constructor(config: EdgeWorkerConfig) {
 		super();
-		this.config = config;
+		this.config = EdgeWorker.normalizeConfigPaths(config);
 		this.cyrusHome = config.cyrusHome;
 		this.logger = createLogger({ component: "EdgeWorker" });
 		this.persistenceManager = new PersistenceManager(
@@ -297,22 +325,19 @@ export class EdgeWorker extends EventEmitter {
 		);
 
 		// Mirror Claude SDK session transcripts to the hosted control plane
-		// when CYRUS_APP_URL (destination), CYRUS_API_KEY (proof of team
-		// ownership), and CYRUS_TEAM_ID (which team the transcripts belong to)
-		// are all configured. If any is missing the store stays null and the
-		// SDK falls back to local JSONL only. Operators can also opt out
+		// when CYRUS_API_KEY (proof of team ownership) and CYRUS_TEAM_ID
+		// (which team the transcripts belong to) are configured. The
+		// destination URL defaults to DEFAULT_CYRUS_APP_URL but can be
+		// overridden via CYRUS_APP_URL for preview environments. If either
+		// of the required vars is missing the store stays null and the SDK
+		// falls back to local JSONL only. Operators can also opt out
 		// explicitly by setting CYRUS_DISABLE_REMOTE_SESSION_STORE=1, which
-		// keeps transcripts local even when the three vars above are present.
-		const sessionStoreBaseUrl = process.env.CYRUS_APP_URL;
+		// keeps transcripts local even when the vars above are present.
+		const sessionStoreBaseUrl = getCyrusAppUrl();
 		const sessionStoreApiKey = process.env.CYRUS_API_KEY;
 		const sessionStoreTeamId = process.env.CYRUS_TEAM_ID;
 		const sessionStoreDisabled = this.isRemoteSessionStoreDisabled();
-		if (
-			!sessionStoreDisabled &&
-			sessionStoreBaseUrl &&
-			sessionStoreApiKey &&
-			sessionStoreTeamId
-		) {
+		if (!sessionStoreDisabled && sessionStoreApiKey && sessionStoreTeamId) {
 			this.claudeSessionStore = new HttpSessionStore({
 				baseUrl: sessionStoreBaseUrl,
 				apiKey: sessionStoreApiKey,
@@ -324,7 +349,6 @@ export class EdgeWorker extends EventEmitter {
 			);
 		} else if (
 			sessionStoreDisabled &&
-			sessionStoreBaseUrl &&
 			sessionStoreApiKey &&
 			sessionStoreTeamId
 		) {
@@ -336,8 +360,23 @@ export class EdgeWorker extends EventEmitter {
 		// Initialize GitHub comment service for posting replies to GitHub PRs
 		this.gitHubCommentService = new GitHubCommentService();
 
-		// Initialize GitLab comment service for posting replies to GitLab MRs
-		this.gitLabCommentService = new GitLabCommentService();
+		// Initialize GitLab comment service for posting replies to GitLab MRs.
+		// For Self-Managed GitLab the API base URL must be derived from the
+		// configured repos' gitlabUrl host; otherwise the service falls back to
+		// gitlab.com and 404s on every reply. Picks the first configured
+		// GitLab repo's host (single GitLab host per Cyrus instance).
+		const firstGitlabRepo = config.repositories.find((r) => r.gitlabUrl);
+		let gitlabApiBaseUrl: string | undefined;
+		if (firstGitlabRepo?.gitlabUrl) {
+			try {
+				gitlabApiBaseUrl = new URL(firstGitlabRepo.gitlabUrl).origin;
+			} catch {
+				// malformed gitlabUrl — leave undefined and fall through to default
+			}
+		}
+		this.gitLabCommentService = new GitLabCommentService(
+			gitlabApiBaseUrl ? { apiBaseUrl: gitlabApiBaseUrl } : undefined,
+		);
 
 		// Initialize global session registry (centralized session storage)
 		this.globalSessionRegistry = new GlobalSessionRegistry();
@@ -450,8 +489,6 @@ export class EdgeWorker extends EventEmitter {
 					parentSessionId,
 					prompt,
 					childSessionId,
-					repo,
-					this.agentSessionManager,
 				);
 			},
 		);
@@ -613,7 +650,7 @@ export class EdgeWorker extends EventEmitter {
 				await this.addNewRepositories(changes.added);
 				// Live-update sandbox / egress proxy settings
 				await this.applySandboxConfigChanges(changes.newConfig);
-				this.config = changes.newConfig;
+				this.config = EdgeWorker.normalizeConfigPaths(changes.newConfig);
 				this.configManager.setConfig(changes.newConfig);
 				this.runnerSelectionService.setConfig(changes.newConfig);
 				this.toolPermissionResolver.setConfig(changes.newConfig);
@@ -724,6 +761,12 @@ export class EdgeWorker extends EventEmitter {
 				cliEventTransport.on("event", (event: AgentEvent) => {
 					const repos = Array.from(this.repositories.values());
 					this.handleWebhook(event as unknown as Webhook, repos);
+				});
+
+				// Listen for unified internal messages (used by F1 to emit
+				// IssueStateChangeMessage when an issue is terminated).
+				cliEventTransport.on("message", (message: InternalMessage) => {
+					this.handleMessage(message);
 				});
 
 				// Listen for errors
@@ -996,6 +1039,24 @@ export class EdgeWorker extends EventEmitter {
 	}
 
 	/**
+	 * Whether Cyrus should follow plain replies in a Slack thread it was
+	 * @mentioned in. Enabled by default; controlled by the per-team
+	 * `slackThreadFollowing` config toggle (Behaviours page) and force-disabled
+	 * by the `CYRUS_SLACK_THREAD_FOLLOWING_DISABLED` env kill-switch, which takes
+	 * precedence over the toggle. When disabled, only @mentions are processed.
+	 */
+	private isSlackThreadFollowingEnabled(): boolean {
+		const envValue = (process.env.CYRUS_SLACK_THREAD_FOLLOWING_DISABLED ?? "")
+			.toLowerCase()
+			.trim();
+		if (envValue === "true" || envValue === "1" || envValue === "yes") {
+			return false;
+		}
+		// Config toggle defaults to enabled when unset.
+		return this.config.slackThreadFollowing !== false;
+	}
+
+	/**
 	 * Register the Slack event transport for receiving forwarded Slack webhooks from CYHOST.
 	 * This creates a /slack-webhook endpoint that handles @mention events from Slack.
 	 */
@@ -1008,10 +1069,18 @@ export class EdgeWorker extends EventEmitter {
 
 		const routingContext =
 			this.promptBuilder.generateRoutingContextForAllWorkspaces();
+		// Only managed teams (cloud or self-hosted, paired with cyrus-hosted)
+		// have a Behaviours page where automatic Slack thread listening can be
+		// turned off — CYRUS_API_KEY is proof of that pairing, so the
+		// stop-listening prompt guidance is gated on it. Community members
+		// don't have the key (or the page).
+		const cyrusAppBaseUrl = process.env.CYRUS_API_KEY
+			? getCyrusAppUrl()
+			: undefined;
 		const slackAdapter = new SlackChatAdapter(
 			chatRepositoryProvider,
 			this.logger,
-			{ repositoryRoutingContext: routingContext },
+			{ repositoryRoutingContext: routingContext, cyrusAppBaseUrl },
 		);
 
 		if (
@@ -1036,6 +1105,20 @@ export class EdgeWorker extends EventEmitter {
 						model: this.getDefaultModelForRunner(runnerType),
 						fallbackModel: this.getDefaultFallbackModelForRunner(runnerType),
 					});
+				},
+				// Live read so hot-reloaded config (`setConfig`) picks up new
+				// per-platform MCP paths without rebuilding the handler.
+				getPlatformMcpConfigOverrides: () => this.config.slackMcpConfigs,
+				resolveSkillsConfig: async ({ repository, repositoryPaths }) => {
+					const plugins = await this.skillsPluginResolver.resolve();
+					const skills = await this.skillsPluginResolver.discoverSkillNames(
+						plugins,
+						{
+							repositoryId: repository?.id,
+							repoPaths: repositoryPaths,
+						},
+					);
+					return { plugins, skills };
 				},
 				onWebhookStart: () => {
 					this.activeWebhookCount++;
@@ -1070,6 +1153,9 @@ export class EdgeWorker extends EventEmitter {
 			fastifyServer: this.sharedApplicationServer.getFastifyInstance(),
 			verificationMode: slackVerificationMode,
 			secret: slackSecret,
+			// Live read so the per-team toggle (hot-reloaded via config) and the
+			// env kill-switch both take effect without rebuilding the transport.
+			isThreadFollowingEnabled: () => this.isSlackThreadFollowingEnabled(),
 		});
 
 		this.slackEventTransport.on("event", (event: SlackWebhookEvent) => {
@@ -1164,6 +1250,16 @@ export class EdgeWorker extends EventEmitter {
 				}
 			}
 
+			// Honor the PR-review trigger toggle: when disabled, ignore
+			// pull_request_review events entirely — no acknowledgement comment and
+			// no agent session. Defaults to enabled when the flag is unset.
+			if (isPullRequestReview && this.config.prReviewTrigger === false) {
+				this.logger.debug(
+					`PR review trigger is disabled, ignoring pull_request_review on ${repoFullName}#${prNumber}`,
+				);
+				return;
+			}
+
 			// Only trigger on comments that mention the bot (when configured)
 			// Skip this check for pull_request_review events — reviews don't @mention the bot
 			if (
@@ -1211,6 +1307,47 @@ export class EdgeWorker extends EventEmitter {
 				this.logger.warn(
 					`No repository configured for GitHub repo: ${repoFullName}`,
 				);
+
+				// Only reply on signals where the user clearly directed something at us:
+				// an explicit @-mention, or a pull_request_review requesting changes.
+				const wasMentioned =
+					!!botUsername && commentBody.includes(`@${botUsername}`);
+				const shouldReply = wasMentioned || isPullRequestReview;
+
+				if (shouldReply && reactionToken && prNumber) {
+					// Presence of CYRUS_API_KEY indicates this worker is paired with the
+					// managed control plane (paid customer). Absence means the worker is
+					// running on the Community plan (self-managed config.json).
+					const isManagedCustomer = !!process.env.CYRUS_API_KEY;
+
+					const commonPreamble = [
+						`Cyrus received this webhook but has no repository configured for \`${repoFullName}\`, so no agent session was started.`,
+						``,
+						`**Likely causes:**`,
+						`- The owner/org was **renamed or transferred** on GitHub. Webhooks are delivered under the current owner name, but Cyrus's stored repository URL still points at the old one. GitHub's web redirects don't apply to webhook payloads — the stored URL has to be updated explicitly.`,
+						`- The stored repository URL has a typo (e.g. wrong org/owner) and doesn't match the repo this event came from.`,
+						`- The GitHub App / webhook is installed on a repo Cyrus isn't configured for at all.`,
+						``,
+					];
+
+					const fix = isManagedCustomer
+						? `**What to do:** there's currently no self-serve way to update the stored repository URL on your plan — please reach out to Cyrus support and reference \`${repoFullName}\` and we'll reconcile it on the backend.`
+						: `**What to do:** open \`~/.cyrus/config.json\` on the worker and update the \`githubUrl\` of the relevant repository to \`https://github.com/${repoFullName}\`. The worker watches the config file and will pick up the change automatically. If this repo shouldn't be sending events to Cyrus at all, remove the GitHub App from it instead.`;
+
+					this.gitHubCommentService
+						.postIssueComment({
+							token: reactionToken,
+							owner: extractRepoOwner(event),
+							repo: extractRepoName(event),
+							issueNumber: prNumber,
+							body: [...commonPreamble, fix].join("\n"),
+						})
+						.catch((err: unknown) => {
+							this.logger.warn(
+								`Failed to post unconfigured-repo notice: ${err instanceof Error ? err.message : err}`,
+							);
+						});
+				}
 				return;
 			}
 
@@ -1370,11 +1507,12 @@ export class EdgeWorker extends EventEmitter {
 					)
 				: this.buildGitHubSystemPrompt(event, branchRef, taskInstructions);
 
-			// Build allowed tools and directories
-			// Exclude Slack MCP tools from GitHub sessions
-			const allowedTools = this.buildAllowedTools(repository).filter(
-				(t) => t !== "mcp__slack",
-			);
+			// Build allowed tools using the GitHub platform resolver, which honors
+			// `githubAllowedTools` on the workspace config and falls back to
+			// `GITHUB_DEFAULT_ALLOWED_TOOLS` (which intentionally omits
+			// `mcp__slack` — no subtractive filtering needed).
+			const allowedTools =
+				this.toolPermissionResolver.buildGithubAllowedTools(repository);
 			const disallowedTools = this.buildDisallowedTools(repository);
 			const allowedDirectories: string[] = [repository.repositoryPath];
 
@@ -1392,7 +1530,9 @@ export class EdgeWorker extends EventEmitter {
 					undefined, // labels
 					undefined, // issueDescription
 					200, // maxTurns
-					{ excludeSlackMcp: true }, // Exclude Slack MCP server from GitHub sessions
+					undefined, // linearWorkspaceId
+					this.buildSkillSessionContext(repository, undefined, session),
+					"github", // sessionPlatform → uses githubMcpConfigs override
 				);
 
 			const runner = this.createRunnerForType(runnerType, runnerConfig);
@@ -1522,11 +1662,20 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 				existingRunner?.supportsStreamingInput &&
 				existingRunner.addStreamMessage
 			) {
-				existingRunner.addStreamMessage(notification);
-				this.logger.debug(
-					`[base-branch-update] Streamed notification to session ${session.id} for branch ${branchName}`,
-				);
-				break;
+				// Best-effort notification; a steer-only backend may reject it if no
+				// turn is active. Don't let that throw out of the update handler.
+				try {
+					existingRunner.addStreamMessage(notification);
+					this.logger.debug(
+						`[base-branch-update] Streamed notification to session ${session.id} for branch ${branchName}`,
+					);
+					break;
+				} catch (error) {
+					this.logger.debug(
+						`[base-branch-update] Stream rejected for session ${session.id}; skipping`,
+						{ error: error instanceof Error ? error.message : String(error) },
+					);
+				}
 			}
 		}
 	}
@@ -2036,11 +2185,11 @@ ${taskSection}`;
 					)
 				: this.buildGitLabSystemPrompt(event, branchRef, taskInstructions);
 
-			// Build allowed tools and directories
-			// Exclude Slack MCP tools from GitLab sessions
-			const allowedTools = this.buildAllowedTools(repository).filter(
-				(t) => t !== "mcp__slack",
-			);
+			// Build allowed tools using the GitHub platform resolver — GitLab and
+			// GitHub share the same PR-targeted, single-repo intent, so they use
+			// the same `githubAllowedTools` knob and the same `GITHUB_*` default.
+			const allowedTools =
+				this.toolPermissionResolver.buildGithubAllowedTools(repository);
 			const disallowedTools = this.buildDisallowedTools(repository);
 			const allowedDirectories: string[] = [repository.repositoryPath];
 
@@ -2058,7 +2207,9 @@ ${taskSection}`;
 					undefined, // labels
 					undefined, // issueDescription
 					200, // maxTurns
-					{ excludeSlackMcp: true }, // Exclude Slack MCP server from GitLab sessions
+					undefined, // linearWorkspaceId
+					this.buildSkillSessionContext(repository, undefined, session),
+					"gitlab", // sessionPlatform → uses githubMcpConfigs override
 				);
 
 			const runner = this.createRunnerForType(runnerType, runnerConfig);
@@ -2652,8 +2803,6 @@ ${taskSection}`;
 		parentSessionId: string,
 		prompt: string,
 		childSessionId: string,
-		_childRepo: RepositoryConfig,
-		childAgentSessionManager: AgentSessionManager,
 	): Promise<void> {
 		const log = this.logger.withContext({ sessionId: parentSessionId });
 		log.info(
@@ -2684,8 +2833,7 @@ ${taskSection}`;
 		);
 
 		// Get the child session to access its workspace path
-		// Child session is in the child's manager (passed in from the callback)
-		const childSession = childAgentSessionManager.getSession(childSessionId);
+		const childSession = this.agentSessionManager.getSession(childSessionId);
 		const childWorkspaceDirs: string[] = [];
 		if (childSession) {
 			childWorkspaceDirs.push(childSession.workspace.path);
@@ -3260,8 +3408,25 @@ ${taskSection}`;
 			this.agentSessionManager.removeSession(session.id);
 		}
 
+		// Build the set of repositories involved with this issue so per-repo
+		// cyrus-teardown.sh scripts (if present) can run before worktrees are
+		// removed. Source-of-truth is the session manager: each session's
+		// repositoryId maps to a configured RepositoryConfig.
+		const repoIds = new Set<string>();
+		for (const session of sessions) {
+			const repoId = this.sessionRepositories.get(session.id);
+			if (repoId) repoIds.add(repoId);
+		}
+		const teardownRepositories: RepositoryConfig[] = [];
+		for (const repoId of repoIds) {
+			const repo = this.repositories.get(repoId);
+			if (repo) teardownRepositories.push(repo);
+		}
+
 		// Delete worktrees for this issue, keyed by the Linear issue identifier.
-		this.gitService.deleteWorktree(message.workItemIdentifier);
+		await this.gitService.deleteWorktree(message.workItemIdentifier, {
+			repositories: teardownRepositories,
+		});
 
 		this.logger.info(
 			`Completed cleanup for ${message.workItemIdentifier}: stopped ${sessions.length} session(s)`,
@@ -3514,12 +3679,20 @@ ${taskSection}`;
 				existingRunner?.supportsStreamingInput &&
 				existingRunner.addStreamMessage
 			) {
-				existingRunner.addStreamMessage(fullPrompt);
-				delivered = true;
-				this.logger.debug(
-					`[issue-update] Streamed update to session ${sessionId} (key=${webhookKey}, changed=[${changedFields.join(", ")}])`,
-				);
-				break;
+				// Best-effort; a steer-only backend may reject when no turn is active.
+				try {
+					existingRunner.addStreamMessage(fullPrompt);
+					delivered = true;
+					this.logger.debug(
+						`[issue-update] Streamed update to session ${sessionId} (key=${webhookKey}, changed=[${changedFields.join(", ")}])`,
+					);
+					break;
+				} catch (error) {
+					this.logger.debug(
+						`[issue-update] Stream rejected for session ${sessionId}; skipping (key=${webhookKey})`,
+						{ error: error instanceof Error ? error.message : String(error) },
+					);
+				}
 			} else if (isRunning) {
 				this.logger.debug(
 					`[issue-update] Session ${sessionId} is running but doesn't support streaming input, skipping (key=${webhookKey})`,
@@ -3899,10 +4072,22 @@ ${taskSection}`;
 			? await this.config.handlers.createWorkspace(fullIssue, repositories, {
 					baseBranchOverrides,
 					branchPrefixOverrides,
+					onRepoSetupHookEvent: (activity) =>
+						this.activityPoster.postRepoSetupHookActivity(
+							sessionId,
+							linearWorkspaceId,
+							activity,
+						),
 				})
 			: await this.gitService.createGitWorktree(fullIssue, repositories, {
 					baseBranchOverrides,
 					branchPrefixOverrides,
+					onRepoSetupHookEvent: (activity) =>
+						this.activityPoster.postRepoSetupHookActivity(
+							sessionId,
+							linearWorkspaceId,
+							activity,
+						),
 				});
 
 		this.logger.debug(`Workspace created at: ${workspace.path}`);
@@ -4008,7 +4193,7 @@ ${taskSection}`;
 			...new Set([
 				attachmentsDir,
 				...allRepoPaths,
-				...this.gitService.getGitMetadataDirectories(workspace.path),
+				...this.gitService.getGitMetadataDirectoriesForWorkspace(workspace),
 			]),
 		];
 
@@ -4499,9 +4684,8 @@ ${taskSection}`;
 					labels, // Pass labels for runner selection and model override
 					fullIssue.description || undefined, // Description tags can override label selectors
 					undefined, // maxTurns
-					undefined, // mcpOptions
 					linearWorkspaceId,
-					this.buildSkillSessionContext(primaryRepo, fullIssue),
+					this.buildSkillSessionContext(primaryRepo, fullIssue, session),
 				);
 
 			log.debug(
@@ -5299,13 +5483,21 @@ ${taskSection}`;
 	 * - the active repository's Cyrus config ID,
 	 * - the Linear team that owns the issue, and
 	 * - the Linear label IDs attached to the issue.
+	 *
+	 * The session's repo working-tree path(s) are also captured so that
+	 * repo-local skills (`<repoPath>/.claude/skills/*`) get unioned into the
+	 * resolved whitelist. When a `session` is provided its workspace is used to
+	 * resolve those paths (covering multi-repo sessions); otherwise the active
+	 * repository's path is used.
 	 */
 	private buildSkillSessionContext(
 		repository: RepositoryConfig,
 		fullIssue?: Issue,
+		session?: CyrusAgentSession,
 	): SkillSessionContext {
 		const context: SkillSessionContext = {
 			repositoryId: repository.id,
+			repoPaths: this.resolveSkillRepoPaths(repository, session),
 		};
 		if (fullIssue?.teamId) {
 			context.linearTeamId = fullIssue.teamId;
@@ -5317,6 +5509,29 @@ ${taskSection}`;
 			context.linearLabelIds = [...(fullIssue?.labelIds ?? [])];
 		}
 		return context;
+	}
+
+	/**
+	 * Resolve the repo working-tree path(s) whose `.claude/skills/` directories
+	 * should contribute to the skill whitelist for a session.
+	 *
+	 * - Multi-repo sessions: every sub-worktree in `workspace.repoPaths`.
+	 * - Single-repo / GitHub-mention sessions: the active repository's path.
+	 */
+	private resolveSkillRepoPaths(
+		repository: RepositoryConfig,
+		session?: CyrusAgentSession,
+	): string[] {
+		const repoPaths = session?.workspace?.repoPaths;
+		if (repoPaths) {
+			const paths = Object.values(repoPaths).filter(
+				(p): p is string => typeof p === "string" && p.length > 0,
+			);
+			if (paths.length > 0) {
+				return [...new Set(paths)];
+			}
+		}
+		return [repository.repositoryPath];
 	}
 
 	/**
@@ -5762,19 +5977,157 @@ ${taskSection}`;
 		);
 	}
 
-	private createCyrusToolsOptions(parentSessionId?: string): CyrusToolsOptions {
+	private failureModesClient: FailureModesHttpClient | null = null;
+
+	/**
+	 * Lazily build the HTTP client used by `log_failure_mode` to POST to
+	 * cyrus-hosted. Uses `CYRUS_APP_URL` (the same env var the remote
+	 * session-store client reads, see top of this file) so preview
+	 * environments and prod share a single way to point at a control
+	 * plane. Returns null when either the URL or the `CYRUS_API_KEY` are
+	 * missing — in that mode the tool is simply not registered, so
+	 * customer-mode CLI users without a control plane don't see a broken
+	 * tool.
+	 */
+	private getFailureModesClient(): FailureModesHttpClient | null {
+		if (this.failureModesClient) return this.failureModesClient;
+		const apiKey = process.env.CYRUS_API_KEY?.trim();
+		if (!apiKey) return null;
+		const baseUrl = getCyrusAppUrl();
+		this.failureModesClient = createFetchFailureModesClient({
+			baseUrl,
+			apiKey,
+		});
+		return this.failureModesClient;
+	}
+
+	/**
+	 * Resolve a working-directory string to the agent session id that owns
+	 * that workspace. The `log_failure_mode` MCP tool calls this with the
+	 * agent's reported `cwd`. We normalize and compare against each known
+	 * session's `workspace.path` (and any sub-repo paths the session opens).
+	 */
+	/**
+	 * Resolve a working-directory string to the rich session bundle a
+	 * Cyrus team member needs to triage a failure-mode report: the
+	 * internal session id (for dedup), the runner session id + runner
+	 * type (so triage can pull the Claude/Gemini/Codex/Cursor transcript),
+	 * the Linear AgentSession + source-issue identifiers (so triage can
+	 * jump to the customer thread), and the workspace path (for repro).
+	 *
+	 * Returns null only when no session matches. We prefer an exact
+	 * workspace-path or sub-repo-path match; if neither hits, we fall
+	 * back to a prefix match for nested cwds (e.g. shells in a subdir).
+	 */
+	/**
+	 * Aggregator over every place active sessions live in this process.
+	 * Today: the primary AgentSessionManager (issue sessions) and the
+	 * ChatSessionHandler's private one (Slack / GitHub-PR-chat / future
+	 * chat platforms). New session origins should be added here so
+	 * downstream consumers (currently just resolveSessionFromCwd) keep
+	 * working without modification — single open extension point (OCP),
+	 * single responsibility (SRP: this method's only job is "where do
+	 * sessions live?", separate from "how do we match one by cwd?").
+	 */
+	private getAllKnownSessions(): CyrusAgentSession[] {
+		return [
+			...this.agentSessionManager.getAllSessions(),
+			...(this.chatSessionHandler?.getAllChatSessions() ?? []),
+		];
+	}
+
+	private resolveSessionFromCwd(cwd: string): ResolvedSession | null {
+		if (!cwd) return null;
+		const normalize = (p: string) => p.replace(/\/+$/, "");
+		const target = normalize(cwd);
+
+		const sessions = this.getAllKnownSessions();
+
+		const exact = sessions.find((session) => {
+			if (normalize(session.workspace?.path ?? "") === target) return true;
+			const repoPaths = session.workspace?.repoPaths;
+			if (repoPaths) {
+				for (const p of Object.values(repoPaths)) {
+					if (typeof p === "string" && normalize(p) === target) return true;
+				}
+			}
+			return false;
+		});
+
+		const prefix = exact
+			? undefined
+			: sessions.find((session) => {
+					const root = normalize(session.workspace?.path ?? "");
+					return root && target.startsWith(`${root}/`);
+				});
+
+		const session = exact ?? prefix;
+		if (!session) return null;
+
+		const runnerType = session.claudeSessionId
+			? "claude"
+			: session.geminiSessionId
+				? "gemini"
+				: session.codexSessionId
+					? "codex"
+					: session.cursorSessionId
+						? "cursor"
+						: null;
+		const runnerSessionId =
+			session.claudeSessionId ??
+			session.geminiSessionId ??
+			session.codexSessionId ??
+			session.cursorSessionId ??
+			null;
+
+		const sessionSource = session.id.startsWith("github-")
+			? "github"
+			: session.id.startsWith("gitlab-")
+				? "gitlab"
+				: session.id.startsWith("slack-")
+					? "slack"
+					: (session.issueContext?.trackerId ?? "linear");
+
+		// For Linear-source sessions, `session.id` is already the Linear
+		// AgentSession id (they're literally the same UUID — the v3 rename
+		// from `linearAgentActivitySessionId` to `id` kept the value). So we
+		// don't surface a separate `linearAgentSessionId` — the server keys
+		// dedup on `session_id` and that *is* the Linear AgentSession id when
+		// `session_source === 'linear'`.
 		return {
+			sessionId: session.id,
+			runnerSessionId,
+			runnerType,
+			sourceIssueIdentifier:
+				session.issueContext?.issueIdentifier ??
+				session.issue?.identifier ??
+				null,
+			workspacePath: session.workspace?.path ?? null,
+			sessionSource,
+		};
+	}
+
+	private createCyrusToolsOptions(parentSessionId?: string): CyrusToolsOptions {
+		const failureModesClient = this.getFailureModesClient();
+		const options: CyrusToolsOptions = {
 			parentSessionId,
-			onSessionCreated: (childSessionId, parentId) => {
+			onSessionCreated: (childSessionId: string, parentId: string) => {
 				this.handleChildSessionMapping(childSessionId, parentId);
 			},
-			onFeedbackDelivery: async (childSessionId, message) => {
+			onFeedbackDelivery: async (childSessionId: string, message: string) => {
 				return this.handleFeedbackDeliveryToChildSession(
 					childSessionId,
 					message,
 				);
 			},
 		};
+		if (failureModesClient) {
+			options.failureModes = {
+				resolveSessionFromCwd: (cwd: string) => this.resolveSessionFromCwd(cwd),
+				httpClient: failureModesClient,
+			};
+		}
+		return options;
 	}
 
 	private handleChildSessionMapping(
@@ -6066,6 +6419,7 @@ ${taskSection}`;
 		const skillsContext = this.buildSkillSessionContext(
 			repositories[0]!,
 			input.fullIssue,
+			input.session,
 		);
 		systemPrompt += await this.skillsPluginResolver.buildSkillsGuidance(
 			undefined,
@@ -6348,9 +6702,14 @@ ${input.userComment}
 		labels?: string[],
 		issueDescription?: string,
 		maxTurns?: number,
-		mcpOptions?: { excludeSlackMcp?: boolean },
 		linearWorkspaceId?: string,
 		skillContext?: SkillSessionContext,
+		/**
+		 * Which platform initiated the session — drives which
+		 * `EdgeWorkerConfig.<platform>McpConfigs` override list applies.
+		 * Defaults to `"linear"` (the pre-platform-aware behavior).
+		 */
+		sessionPlatform: "linear" | "github" | "gitlab" = "linear",
 	): Promise<{ config: AgentRunnerConfig; runnerType: RunnerType }> {
 		const log = this.logger.withContext({
 			sessionId,
@@ -6363,6 +6722,7 @@ ${input.userComment}
 		const plugins = await this.skillsPluginResolver.resolve();
 		const resolvedSkillContext: SkillSessionContext = skillContext ?? {
 			repositoryId: repository.id,
+			repoPaths: this.resolveSkillRepoPaths(repository, session),
 		};
 		const allowedSkillNames =
 			await this.skillsPluginResolver.discoverSkillNames(
@@ -6382,7 +6742,17 @@ ${input.userComment}
 			labels,
 			issueDescription,
 			maxTurns,
-			mcpOptions,
+			// Per-platform MCP config paths — GitHub + GitLab share the
+			// `githubMcpConfigs` knob (single-repo PR contexts both); Linear
+			// gets `linearMcpConfigs`. Not a blanket override: the builder
+			// uses `repository.mcpConfigPath` when this repo has its own
+			// `allowedTools` override (so the repo's permission rules and
+			// MCP server set travel as a unit), and only falls through to
+			// this list when the repo inherits the platform allow-list.
+			platformMcpConfigOverrides:
+				sessionPlatform === "linear"
+					? this.config.linearMcpConfigs
+					: this.config.githubMcpConfigs,
 			linearWorkspaceId,
 			cyrusHome: this.cyrusHome,
 			logger: log,
@@ -6666,9 +7036,19 @@ ${input.userComment}
 						session.id,
 					);
 
-					// Merge any file-based MCP configs (reuses shared normalization)
-					const mcpConfigPath =
-						this.mcpConfigService.buildMergedMcpConfigPath(repo);
+					// Merge any file-based MCP configs (reuses shared normalization).
+					// Warmup paths reconstruct Linear-triggered issue sessions:
+					// if the repo has its own `allowedTools` override its
+					// mcpConfigPath stays scoped to that repo, otherwise the
+					// team-level `linearMcpConfigs` list applies. Same coupling
+					// the live `buildIssueConfig` path uses.
+					const mcpConfigPath = resolveIssueMcpConfigPath(
+						repo,
+						this.config.linearMcpConfigs,
+						this.mcpConfigService.buildMergedMcpConfigPath.bind(
+							this.mcpConfigService,
+						),
+					);
 					let mcpServers: Record<string, McpServerConfig> = { ...mcpConfig };
 					if (mcpConfigPath) {
 						const paths = Array.isArray(mcpConfigPath)
@@ -6951,11 +7331,23 @@ ${input.userComment}
 				fullPrompt = `${promptBody}\n\n${attachmentManifest}`;
 			}
 
-			existingRunner.addStreamMessage(fullPrompt);
-			return true; // Message added to stream
+			// `addStreamMessage` can reject the message if the turn ended in the
+			// race window between "still running" and "turn finished" (e.g. the
+			// Codex app-server backend, which only steers an active turn). Fall
+			// through to the resume path so the comment is never dropped. Claude's
+			// streaming input never throws here, so this is a no-op for Claude.
+			try {
+				existingRunner.addStreamMessage(fullPrompt);
+				return true; // Message added to stream
+			} catch (error) {
+				log.warn(
+					`Streaming message rejected for ${sessionId}; falling back to resume (${logContext})`,
+					{ error: error instanceof Error ? error.message : String(error) },
+				);
+			}
 		}
 
-		// Not streaming - resume/start session
+		// Not streaming (or streaming was rejected) - resume/start session
 		log.debug(`Resuming Claude session for ${sessionId} (${logContext})`);
 
 		await this.resumeAgentSession(
@@ -7032,8 +7424,18 @@ ${input.userComment}
 			if (attachmentManifest) {
 				fullPrompt = `${promptBody}\n\n${attachmentManifest}`;
 			}
-			existingRunner.addStreamMessage(fullPrompt);
-			return;
+			// See handlePromptWithStreamingCheck: a steer-only backend can reject
+			// the message if the turn just ended. Fall through to a fresh resume
+			// turn rather than dropping the comment. No-op for Claude.
+			try {
+				existingRunner.addStreamMessage(fullPrompt);
+				return;
+			} catch (error) {
+				log.warn(
+					`Streaming message rejected for ${sessionId}; falling back to resume`,
+					{ error: error instanceof Error ? error.message : String(error) },
+				);
+			}
 		}
 
 		// Stop existing runner if it's not running
@@ -7104,7 +7506,9 @@ ${input.userComment}
 				attachmentsDir,
 				repository.repositoryPath,
 				...additionalAllowedDirectories,
-				...this.gitService.getGitMetadataDirectories(session.workspace.path),
+				...this.gitService.getGitMetadataDirectoriesForWorkspace(
+					session.workspace,
+				),
 			]),
 		];
 
@@ -7138,9 +7542,8 @@ ${input.userComment}
 				labels, // Always pass labels to preserve model override
 				fullIssue.description || undefined, // Description tags can override label selectors
 				maxTurns, // Pass maxTurns if specified
-				undefined, // mcpOptions
 				resolvedWorkspaceId,
-				this.buildSkillSessionContext(repository, fullIssue),
+				this.buildSkillSessionContext(repository, fullIssue, session),
 			);
 
 		// Create the appropriate runner based on session state

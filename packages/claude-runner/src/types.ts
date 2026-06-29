@@ -29,6 +29,13 @@ export interface ClaudeRunnerConfig {
 	allowedTools?: string[];
 	disallowedTools?: string[];
 	allowedDirectories?: string[];
+	/**
+	 * Extra working-tree roots passed to the SDK `additionalDirectories` option
+	 * (the `--add-dir` flag). Beyond widening the permission scope, `--add-dir`
+	 * auto-loads each directory's `.claude/skills/` — the documented exception
+	 * that makes repo-local skills in multi-repo sub-worktrees discoverable.
+	 */
+	additionalDirectories?: string[];
 	resumeSessionId?: string; // Session ID to resume from previous Claude session
 	workspaceName?: string;
 	systemPrompt?: string;
@@ -65,7 +72,7 @@ export interface ClaudeRunnerConfig {
 	/** Additional environment variables to pass to the Claude child process (merged after process.env) */
 	additionalEnv?: Record<string, string>;
 	pathToClaudeCodeExecutable?: string; // Explicit path to Claude Code CLI executable (auto-resolved if not set)
-	extraArgs?: Record<string, string | null>; // Additional CLI arguments to pass to Claude Code (e.g., { chrome: null } for --chrome flag)
+	extraArgs?: Record<string, string | null>; // Additional CLI arguments to pass to Claude Code (e.g., { 'output-format': 'json' } for --output-format=json, or { verbose: null } for boolean flags)
 	/**
 	 * Callback for handling AskUserQuestion tool invocations.
 	 * When provided, the ClaudeRunner will intercept AskUserQuestion tool calls

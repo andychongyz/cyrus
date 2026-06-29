@@ -369,11 +369,16 @@ describe("EdgeWorker - Issue Update Session Delivery (CYPACK-954)", () => {
 	});
 
 	// =========================================================================
-	// Webhook deduplication
+	// Webhook delivery (deduplication intentionally disabled)
 	// =========================================================================
 
-	describe("Webhook deduplication", () => {
-		it("should ignore duplicate webhooks with the same createdAt and issueId", async () => {
+	describe("Webhook delivery", () => {
+		it("should stream duplicate webhooks each time (dedup guards removed)", async () => {
+			// This fork intentionally removed the issue-update dedup guard
+			// (processedIssueUpdateKeys) in commit 14e26571 — "remove webhook
+			// deduplication guards from EdgeWorker". As a result, Linear's
+			// at-least-once delivery causes a duplicate webhook to be streamed
+			// to the running session again, rather than being suppressed.
 			const runningSession = createMockSession("session-running", {
 				hasRunner: true,
 				isRunning: true,
@@ -391,13 +396,13 @@ describe("EdgeWorker - Issue Update Session Delivery (CYPACK-954)", () => {
 
 			// First delivery
 			await (edgeWorker as any).handleIssueContentUpdate(webhook);
-			// Duplicate delivery
+			// Duplicate delivery — no longer suppressed
 			await (edgeWorker as any).handleIssueContentUpdate(webhook);
 
-			// Should only be streamed once
+			// Streamed both times now that dedup is disabled
 			expect(
 				runningSession.agentRunner!.addStreamMessage,
-			).toHaveBeenCalledTimes(1);
+			).toHaveBeenCalledTimes(2);
 		});
 
 		it("should process webhooks with different createdAt as separate events", async () => {

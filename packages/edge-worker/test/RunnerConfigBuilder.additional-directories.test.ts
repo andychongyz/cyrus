@@ -148,4 +148,54 @@ describe("resolveIssueMcpConfigPath", () => {
 
 		expect(result).toBe("/repo/.mcp.json");
 	});
+
+	it.each([
+		"all",
+		"readOnly",
+		"safe",
+		"coordinator",
+	])("uses repo MCP config when the repo's allowedTools override is the %s preset", (preset) => {
+		const repository = {
+			...makeRepository(),
+			allowedTools: preset,
+			mcpConfigPath: "/repo/.mcp.json",
+		} as unknown as RepositoryConfig;
+		const result = resolveIssueMcpConfigPath(
+			repository,
+			["/home/user/.cyrus/mcp-configs/mcp-supabase.json"],
+			(repo) => (repo as RepositoryConfig).mcpConfigPath,
+		);
+
+		expect(result).toBe("/repo/.mcp.json");
+	});
+
+	it("returns an array when a preset repo declares multiple MCP configs", () => {
+		const repository = {
+			...makeRepository(),
+			allowedTools: "all",
+			mcpConfigPath: ["/repo/a.json", "/repo/b.json"],
+		} as unknown as RepositoryConfig;
+		const result = resolveIssueMcpConfigPath(
+			repository,
+			undefined,
+			(repo) => (repo as RepositoryConfig).mcpConfigPath,
+		);
+
+		expect(result).toEqual(["/repo/a.json", "/repo/b.json"]);
+	});
+
+	it("falls through to platform configs when allowedTools is an empty string", () => {
+		const repository = {
+			...makeRepository(),
+			allowedTools: "",
+			mcpConfigPath: "/repo/.mcp.json",
+		} as unknown as RepositoryConfig;
+		const result = resolveIssueMcpConfigPath(
+			repository,
+			["/home/user/.cyrus/mcp-configs/mcp-supabase.json"],
+			(repo) => (repo as RepositoryConfig).mcpConfigPath,
+		);
+
+		expect(result).toBe("/home/user/.cyrus/mcp-configs/mcp-supabase.json");
+	});
 });

@@ -61,10 +61,30 @@
 			"type": "string"
 		},
 		"allowedTools": {
-			"type": "array",
-			"items": {
-				"type": "string"
-			}
+			"anyOf": [
+				{
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				{
+					"type": "string",
+					"const": "readOnly"
+				},
+				{
+					"type": "string",
+					"const": "safe"
+				},
+				{
+					"type": "string",
+					"const": "all"
+				},
+				{
+					"type": "string",
+					"const": "coordinator"
+				}
+			]
 		},
 		"disallowedTools": {
 			"type": "array",

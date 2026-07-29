@@ -169,9 +169,15 @@ export function resolveIssueMcpConfigPath(
 		repositories: RepositoryConfig | RepositoryConfig[],
 	) => string | string[] | undefined,
 ): string | string[] | undefined {
-	const repoHasAllowedToolsOverride =
-		Array.isArray(repository.allowedTools) &&
-		repository.allowedTools.length > 0;
+	// An override is either an explicit tool list or a named preset
+	// ("all", "readOnly", "safe", "coordinator"). Both forms mean the same
+	// thing here: the operator set the allow-list on the repo, so the repo
+	// also owns its MCP server set. Checking only `Array.isArray` silently
+	// dropped `repository.mcpConfigPath` for every preset-configured repo.
+	const repoHasAllowedToolsOverride = Array.isArray(repository.allowedTools)
+		? repository.allowedTools.length > 0
+		: typeof repository.allowedTools === "string" &&
+			repository.allowedTools.length > 0;
 	if (repoHasAllowedToolsOverride) {
 		return buildMergedMcpConfigPath(repository);
 	}
@@ -242,10 +248,14 @@ export class RunnerConfigBuilder {
 					)
 				: undefined;
 
-		// Extract MCP tool entries from the repository's allowedTools config
-		const userMcpTools = (input.repository?.allowedTools ?? []).filter((tool) =>
-			tool.startsWith("mcp__"),
-		);
+		// Extract MCP tool entries from the repository's allowedTools config.
+		// `allowedTools` may be a named preset ("all", "readOnly", …) rather
+		// than an explicit list; a preset names no MCP tools of its own, and
+		// calling `.filter` on the string would throw.
+		const repoAllowedTools = input.repository?.allowedTools;
+		const userMcpTools = Array.isArray(repoAllowedTools)
+			? repoAllowedTools.filter((tool) => tool.startsWith("mcp__"))
+			: [];
 
 		const mcpConfigKeys = mcpConfig ? Object.keys(mcpConfig) : undefined;
 		const allowedTools = this.chatToolResolver.buildChatAllowedTools(

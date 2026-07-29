@@ -299,7 +299,11 @@ export const RepositoryConfigSchema = z.object({
 	// Optional settings
 	isActive: z.boolean().optional(),
 	promptTemplatePath: z.string().optional(),
-	allowedTools: z.array(z.string()).optional(),
+	// Accepts an explicit tool list or a named preset ("all", "readOnly",
+	// "safe", "coordinator") — `ToolPermissionResolver.resolveToolPreset`
+	// has handled presets here since repository-level preset support landed,
+	// but this schema still only declared the array form.
+	allowedTools: ToolRestrictionSchema.optional(),
 	disallowedTools: z.array(z.string()).optional(),
 	mcpConfigPath: z.union([z.string(), z.array(z.string())]).optional(),
 	appendInstruction: z.string().optional(),

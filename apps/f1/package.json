@@ -14,9 +14,9 @@
 		"server": "bun run server.ts",
 		"server:dev": "bun --watch server.ts",
 		"dev": "tsc --watch",
-		"test": "vitest",
+		"test": "vitest --passWithNoTests",
 		"test:run": "vitest run --passWithNoTests",
-		"test:watch": "vitest",
+		"test:watch": "vitest --passWithNoTests",
 		"typecheck": "tsc --noEmit",
 		"prepublishOnly": "cd ../.. && pnpm build"
 	},

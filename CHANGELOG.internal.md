@@ -4,6 +4,9 @@ This changelog documents internal development changes, refactors, tooling update
 
 ## [Unreleased]
 
+### Fixed
+- `pnpm test` at the repo root no longer exits 1. `packages/cloudflare-tunnel-client` and `apps/f1` contain no test files, and their bare `vitest` scripts failed with "No test files found". Added `--passWithNoTests` so they match their already-correct `test:run` counterparts.
+
 ## [0.2.68] - 2026-08-05
 
 ### Added

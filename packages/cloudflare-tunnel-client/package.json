@@ -23,7 +23,7 @@
 		"build": "tsc",
 		"dev": "tsc --watch",
 		"typecheck": "tsc --noEmit",
-		"test": "vitest",
+		"test": "vitest --passWithNoTests",
 		"test:run": "vitest run --passWithNoTests"
 	},
 	"dependencies": {

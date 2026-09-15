@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- GitHub CLI commands that view, clone, or fork an explicitly named repository now use that repository's installation token when run from another organization's directory. Repository overrides through `GH_REPO` and attached `-R` arguments are also honored. ([CYHOST-913](https://linear.app/ceedar/issue/CYHOST-913), [#1307](https://github.com/cyrusagents/cyrus/pull/1307))
+
 ### Added
 - Cyrus can now read the contents of Linear agent sessions with the separate `get_agent_session_contents` tool, including user prompts, tool results, and responses, with pagination for longer conversations. ([CYPACK-1506](https://linear.app/ceedar/issue/CYPACK-1506), [#1473](https://github.com/cyrusagents/cyrus/pull/1473))
 - New optional `maxConcurrentSessions` setting in `~/.cyrus/config.json` caps how many agent sessions run at once across all repositories and platforms. Extra session starts wait in order for a free slot and begin automatically as running sessions finish. Omit it for the previous unlimited behavior. The value hot-reloads with the config file: raising it admits queued sessions immediately, and lowering it takes effect as running sessions finish. ([#1445](https://github.com/cyrusagents/cyrus/pull/1445), [#1469](https://github.com/cyrusagents/cyrus/pull/1469))
@@ -526,6 +529,9 @@ All notable changes to this project will be documented in this file.
 
 #### cyrus-ai (CLI)
 - cyrus-ai@0.2.64
+
+### Added
+- Cyrus now supports multiple GitHub organizations per team: git and `gh` operations automatically use the right credentials for each repository's org. Tokens are pushed by the Cyrus control plane and a git credential helper picks the matching one per repository, so concurrent sessions across different GitHub orgs no longer share a single login. ([CYHOST-913](https://linear.app/ceedar/issue/CYHOST-913), [#1307](https://github.com/cyrusagents/cyrus/pull/1307))
 
 ## [0.2.63] - 2026-06-09
 

@@ -1,6 +1,6 @@
 {
 	"name": "cyrus-ai",
-	"version": "0.2.68",
+	"version": "0.2.72",
 	"description": "AI-powered Linear issue automation using Claude",
 	"main": "dist/src/app.js",
 	"types": "dist/src/app.d.ts",
@@ -9,13 +9,13 @@
 	},
 	"type": "module",
 	"scripts": {
-		"build": "tsc",
+		"build": "tsgo",
 		"start": "node dist/src/app.js",
-		"dev": "tsc --watch",
+		"dev": "tsgo --watch",
 		"test": "vitest run",
 		"test:run": "vitest run --passWithNoTests",
 		"test:watch": "vitest",
-		"typecheck": "tsc --noEmit",
+		"typecheck": "tsgo --noEmit",
 		"prepublishOnly": "cd ../.. && pnpm build"
 	},
 	"files": [
@@ -50,8 +50,8 @@
 		"cyrus-edge-worker": "workspace:*",
 		"cyrus-slack-event-transport": "workspace:*",
 		"dotenv": "^16.5.0",
-		"express": "^5.2.0",
-		"fastify": "^5.11.2",
+		"express": "^5.2.1",
+		"fastify": "^5.12.1",
 		"file-type": "^21.0.0",
 		"fs-extra": "^11.3.0",
 		"node-fetch": "^2.7.0",
@@ -60,9 +60,9 @@
 	},
 	"devDependencies": {
 		"@types/node": "^20.0.0",
-		"@vitest/ui": "^4.1.10",
+		"@vitest/ui": "^4.1.11",
 		"nodemon": "^3.1.14",
-		"typescript": "^5.3.3",
-		"vitest": "^4.1.10"
+		"@typescript/native-preview": "7.0.0-dev.20260707.2",
+		"vitest": "^4.1.11"
 	}
 }

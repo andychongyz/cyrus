@@ -9,6 +9,7 @@ onlyBuiltDependencies:
   - electron-winstaller
   - esbuild
   - sharp
+  - sqlite3
   - workerd
 
 overrides:
@@ -16,3 +17,21 @@ overrides:
   esbuild@<=0.24.2: '>=0.25.0'
   brace-expansion@>=1.0.0 <=1.1.11: '>=1.1.12'
   brace-expansion@>=2.0.0 <=2.0.1: '>=2.0.2'
+  # Fork security overrides (migrated from root package.json pnpm.overrides)
+  ip-address: '>=10.3.1'
+  '@opentelemetry/core': '>=2.8.0'
+  uuid: '>=11.1.1'
+  body-parser: '>=2.3.0'
+  js-yaml: '>=5.2.2'
+  shell-quote: '>=1.9.0'
+  simple-git: '>=3.36.0'
+  systeminformation: '>=5.31.7'
+  undici: '>=7.28.0'
+  '@modelcontextprotocol/sdk': '>=1.30.0'
+  '@grpc/grpc-js': '>=1.14.4'
+  ajv: '>=8.18.0'
+  picomatch: '>=4.0.4'
+  postcss: '>=8.5.26'
+  hono: '>=4.13.5'
+  '@hono/node-server': '>=2.0.5'
+  '@opentelemetry/propagator-jaeger': '>=2.9.0'

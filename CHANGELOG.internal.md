@@ -4,8 +4,39 @@ This changelog documents internal development changes, refactors, tooling update
 
 ## [Unreleased]
 
+### Changed
+- Switched builds, type checking, and development watch commands to the native TypeScript compiler, reducing measured local build time by 74% and type-check time by 68%. Prompt-assembly tests now use mock Linear trackers reliably, preventing network-dependent CI timeouts. ([CYPACK-1520](https://linear.app/ceedar/issue/CYPACK-1520), [#1485](https://github.com/cyrusagents/cyrus/pull/1485))
+
 ### Fixed
 - `pnpm test` at the repo root no longer exits 1. `packages/cloudflare-tunnel-client` and `apps/f1` contain no test files, and their bare `vitest` scripts failed with "No test files found". Added `--passWithNoTests` so they match their already-correct `test:run` counterparts.
+- Release recovery now compares complete uncompressed package archives, retaining mixed-commit protection while allowing an approved first publish packed by a different gzip implementation to resume safely. ([#1483](https://github.com/cyrusagents/cyrus/pull/1483))
+- The release workflow now submits fresh packages in dependency order before checking npm visibility and archive integrity as a batch, avoiding registry propagation delays being multiplied across the package graph while retaining the pre-tag verification boundary. ([CYPACK-1521](https://linear.app/ceedar/issue/CYPACK-1521), [#1486](https://github.com/cyrusagents/cyrus/pull/1486))
+
+## [0.2.72] - 2026-09-15
+
+_No internal-only changes._
+
+## [0.2.71] - 2026-09-04
+
+### Changed
+- Recorded, after the fact, why #1426 removed the `linear_agent_session_create` and `linear_agent_session_create_on_comment` cyrus-tools: they allowed concurrent child sessions to be started on the same issue. That removal also silently dropped the only runtime caller of `GlobalSessionRegistry.setParentSession`, breaking parent resumption. `EdgeWorker.linkChildSessionToParentIssueSession` now derives the child-to-parent session link from Linear's issue hierarchy on `AgentSessionEvent/created` (and after repository selection), so the removed tools stay removed. ([#1454](https://github.com/cyrusagents/cyrus/pull/1454))
+
+### Fixed
+- The release workflow's npm registry visibility check now waits up to 10 minutes per package instead of 60 seconds. The v0.2.70 release run aborted mid-graph because npm's publish processing exceeded the old 12×5s window even though the publish itself succeeded; the new deadline matches npm's own "may take a few minutes" guidance. ([CYPACK-1478](https://linear.app/ceedar/issue/CYPACK-1478/if-a-mcp-server-has-no-enabled-tools-will-it-not-be-allowed-as-an-mcp), [#1442](https://github.com/cyrusagents/cyrus/pull/1442))
+
+## [0.2.70] - 2026-08-27
+
+### Added
+- Guardrails against silently dropped `EdgeConfig` fields (the CYPACK-1478 / CYHOST-967 bug class): `WorkerService.startEdgeWorker` now spreads the entire file config so pass-through fields forward automatically, `ConfigManager`'s hot-reload merge and global-change watch are driven by a single `RELOAD_MERGED_KEYS` list with a compile-time exhaustiveness check that names any unclassified schema key, and a schema-complete CLI test asserts every `EdgeConfig` field survives into the `EdgeWorkerConfig`. ([CYPACK-1478](https://linear.app/ceedar/issue/CYPACK-1478/if-a-mcp-server-has-no-enabled-tools-will-it-not-be-allowed-as-an-mcp), [#1440](https://github.com/cyrusagents/cyrus/pull/1440))
+
+### Fixed
+- Release workflows now preflight npm package existence before running release work, with actionable first-publish and trusted-publisher guidance for newly added packages ([#1436](https://github.com/cyrusagents/cyrus/pull/1436)).
+
+## [0.2.69] - 2026-08-26
+
+### Fixed
+- Removed obsolete synthetic `fallback_credit` usage fields so all runner packages build against the current shared SDK types. ([#1428](https://github.com/cyrusagents/cyrus/pull/1428))
+>>>>>>> upstream/main
 
 ## [0.2.68] - 2026-08-05
 

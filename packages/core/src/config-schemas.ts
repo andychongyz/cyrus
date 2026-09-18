@@ -3,7 +3,13 @@ import { z } from "zod";
 /**
  * Supported runner/harness types for agent execution.
  */
-export const RunnerTypeSchema = z.enum(["claude", "gemini", "codex", "cursor"]);
+export const RunnerTypeSchema = z.enum([
+	"claude",
+	"gemini",
+	"codex",
+	"cursor",
+	"opencode",
+]);
 export type RunnerType = z.infer<typeof RunnerTypeSchema>;
 
 /**
@@ -50,6 +56,44 @@ export const UserAccessControlConfigSchema = z.object({
 	 * Defaults to: "You are not authorized to delegate issues to this agent."
 	 */
 	blockMessage: z.string().optional(),
+});
+
+export type JsonValue =
+	| string
+	| number
+	| boolean
+	| null
+	| JsonValue[]
+	| { [key: string]: JsonValue };
+
+export const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
+	z.union([
+		z.string(),
+		z.number(),
+		z.boolean(),
+		z.null(),
+		z.array(JsonValueSchema),
+		z.record(z.string(), JsonValueSchema),
+	]),
+);
+
+export type JsonObject = { [key: string]: JsonValue };
+
+export const JsonObjectSchema: z.ZodType<JsonObject> = z.record(
+	z.string(),
+	JsonValueSchema,
+);
+
+export const OpenCodeStateScopeSchema = z.enum([
+	"inherit",
+	"shared",
+	"repository",
+]);
+export type OpenCodeStateScope = z.infer<typeof OpenCodeStateScopeSchema>;
+
+export const OpenCodeConfigSchema = z.object({
+	stateScope: OpenCodeStateScopeSchema.optional(),
+	config: JsonObjectSchema.optional(),
 });
 
 /**
@@ -315,6 +359,9 @@ export const RepositoryConfigSchema = z.object({
 
 	// Repository-specific user access control
 	userAccessControl: UserAccessControlConfigSchema.optional(),
+
+	// Repository-specific OpenCode runtime config overrides
+	opencode: OpenCodeConfigSchema.optional(),
 });
 
 /**
@@ -354,7 +401,7 @@ export const EdgeConfigSchema = z.object({
 	/** Default Gemini model to use across all repositories (e.g., "gemini-2.5-pro") */
 	geminiDefaultModel: z.string().optional(),
 
-	/** Default Codex model to use across all repositories (e.g., "gpt-5.5", "gpt-5.4", "gpt-5.3-codex") */
+	/** Default Codex model to use across all repositories (e.g., "gpt-6-astra", "gpt-5.5", "gpt-5.3-codex") */
 	codexDefaultModel: z.string().optional(),
 
 	/** Default Cursor model to use across all repositories (e.g., "composer-2", "gpt-5.4") */
@@ -362,6 +409,18 @@ export const EdgeConfigSchema = z.object({
 
 	/** Default Cursor fallback model if primary Cursor model is unavailable */
 	cursorDefaultFallbackModel: z.string().optional(),
+
+	/** Default OpenCode model to use across all repositories (e.g., "openai/gpt-5.5", "anthropic/claude-sonnet-4.5") */
+	opencodeDefaultModel: z.string().optional(),
+
+	/** Default OpenCode fallback model if primary OpenCode model is unavailable */
+	opencodeDefaultFallbackModel: z.string().optional(),
+
+	/** Infer OpenCode runner when a model selector uses OpenCode provider/model syntax (e.g., "openai/gpt-5.5", "anthropic/claude-sonnet-4.5") */
+	inferOpenCodeRunnerFromProviderModel: z.boolean().optional(),
+
+	/** Global OpenCode runtime config overrides */
+	opencode: OpenCodeConfigSchema.optional(),
 
 	/**
 	 * Default runner/harness to use when no runner is specified via labels or description tags.
@@ -435,6 +494,17 @@ export const EdgeConfigSchema = z.object({
 	slackMcpConfigs: z.array(z.string()).optional(),
 
 	/**
+	 * Filesystem paths to custom-integration MCP config JSON files for Zulip
+	 * @mention chat sessions. Same repo-agnostic semantics as
+	 * `slackMcpConfigs`.
+	 *
+	 * There is deliberately no `zulipAllowedTools`: chat sessions share one
+	 * tool policy, and `slackAllowedTools` already sets it for every chat
+	 * platform (see `ToolPermissionResolver.buildChatAllowedTools`).
+	 */
+	zulipMcpConfigs: z.array(z.string()).optional(),
+
+	/**
 	 * Filesystem paths to custom-integration MCP config JSON files for
 	 * Linear-triggered agent sessions. NOT a blanket override — this list
 	 * is only consulted when the routed repo does NOT have its own
@@ -456,11 +526,32 @@ export const EdgeConfigSchema = z.object({
 	githubMcpConfigs: z.array(z.string()).optional(),
 
 	/**
+	 * Restrict Claude sessions to MCP servers explicitly supplied by Cyrus.
+	 * When false, Claude Code may also load servers from project/user settings,
+	 * plugins, and authenticated claude.ai connectors. Defaults to true when
+	 * omitted.
+	 */
+	strictMcpConfig: z.boolean().optional(),
+
+	/**
 	 * Whether to trigger agent sessions when issue title, description, or attachments are updated.
 	 * When enabled, the agent receives context showing what changed (old vs new values).
 	 * Defaults to true if not specified.
 	 */
 	issueUpdateTrigger: z.boolean().optional(),
+
+	/**
+	 * Maximum number of agent runner sessions allowed to execute concurrently
+	 * across all repositories and platforms. Additional session starts wait in
+	 * FIFO order for a free slot and begin automatically as running sessions
+	 * finish. Omit for unlimited (the historical behavior).
+	 *
+	 * Use this on hosts where an unbounded burst of webhook-driven sessions
+	 * can exhaust memory or CPU. Hot-reloads with the config file: raising the
+	 * limit admits queued sessions immediately; lowering it applies as
+	 * running sessions finish.
+	 */
+	maxConcurrentSessions: z.number().int().positive().optional(),
 
 	/**
 	 * Whether Cyrus follows along with all subsequent replies in a Slack thread
@@ -608,6 +699,7 @@ export type UserAccessControlConfig = z.infer<
 	typeof UserAccessControlConfigSchema
 >;
 export type LinearWorkspaceConfig = z.infer<typeof LinearWorkspaceConfigSchema>;
+export type OpenCodeConfigOverrides = z.infer<typeof OpenCodeConfigSchema>;
 export type RepositoryConfig = z.infer<typeof RepositoryConfigSchema>;
 export type EdgeConfig = z.infer<typeof EdgeConfigSchema>;
 export type SandboxConfig = z.infer<typeof SandboxConfigSchema>;
